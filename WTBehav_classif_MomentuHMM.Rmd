@@ -1,0 +1,1947 @@
+---
+title: "Behav_classif_MomentuHMM"
+author: "Oceane BEGASSAT"
+date: "2026-05-04"
+output: html_document
+---
+
+
+#Packages
+```{r, warning = FALSE, echo = FALSE}
+library(tidyverse)
+library(momentuHMM)
+library(sf)
+library(amt)
+library(zoo)  
+library(data.table)
+library(gridExtra)
+library(patchwork) #panel of plots
+library(tmap)
+```
+
+# Data processing
+
+##Load data
+```{r}
+data_day <- readRDS("dataHMM.rds")
+```
+
+##1min resampling
+```{r}
+#From data_day, apply a filter (tolerance = 5sec) and reasmple to the same interval
+
+data_day_lowdelta <- data_day %>% 
+  group_by(device_id_date) %>% 
+  arrange(UTC_datetime) %>% 
+  mutate(time_diff = difftime(UTC_datetime, lag(UTC_datetime), units = "secs")) %>%
+  filter(time_diff < 65 & time_diff >55)
+
+#Generate all possible series of regular timestamps (every 60 seconds) by dragging the starting point to the first 15 locations.
+# For each attempt:
+# Resample the data according to this starting point.
+# Count the number of points actually associated with real timestamps (with a tolerance of ±5 seconds).
+# Keep the version that maximises the number of points recovered
+
+resample_60s_tolerance <- function(df, step = 60, tolerance = 5, start_index = 1) {
+  df <- df %>% arrange(UTC_datetime)
+
+  # We start from the nth observation to construct the grid.
+  start_time <- df$UTC_datetime[start_index]
+  end_time <- max(df$UTC_datetime)
+
+# Expected sequence (step = 60s)
+  time_seq <- seq(from = start_time, to = end_time, by = step)
+  
+  #For each theoretical point, we look for the closest actual point within ±5s.
+  matched_points <- purrr::map_dfr(time_seq, function(t_target) {
+    window <- df %>%
+      filter(abs(as.numeric(difftime(UTC_datetime, t_target, units = "secs"))) <= tolerance)
+    
+    if (nrow(window) == 0) return(NULL)  # Si pas de point dans la fenêtre
+    
+    # keep it
+    closest_row <- window %>%
+      slice_min(abs(as.numeric(difftime(UTC_datetime, t_target, units = "secs")))) %>%
+      mutate(resampled_time = t_target)
+    
+    return(closest_row)
+  })
+  
+  return(matched_points)
+}
+
+resample1nona <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 1)) 
+
+resample1nona %>%
+  group_by(device_id_date) %>%
+  summarise(n = n()) %>%
+  summary()
+
+resample2nona <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 2)) 
+
+resample3nona <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 3)) 
+
+resample4nona <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 4)) #--> best one
+
+resample5nona <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 5))
+
+resample4bisnona <- data_day %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 4))
+
+
+#keep resample4 that maximises the data number
+data_1minnona <- resample4nona
+
+#By removing rows where no data was found to match the timestep we can easily have a look on the gaps between consective locations.
+
+#check
+# time diff between consecutive locs
+time_diffs <- data_1minnona %>%
+  group_by(device_id_date) %>%
+  arrange(UTC_datetime) %>%
+  mutate(delta_sec = as.numeric(difftime(UTC_datetime, lag(UTC_datetime), units = "secs"))) %>%
+  ungroup()
+
+plot(time_diffs$delta_sec)
+hist(time_diffs$delta_sec)
+summary(time_diffs$delta_sec) 
+
+
+#Keep the theoretical time grid with NA if no match is found
+
+resample_60s_tolerance <- function(df, step = 60, tolerance = 5, start_index = 1) {
+  df <- df %>% arrange(UTC_datetime)
+
+  start_time <- df$UTC_datetime[start_index]
+  end_time <- max(df$UTC_datetime)
+
+  time_seq <- seq(from = start_time, to = end_time, by = step)
+
+  # Colonnes statiques à préserver même en cas de NA
+  static_cols <- c("name", "device_id", "sex", "pop", "device_id_date")
+  static_values <- df[start_index, static_cols]
+
+  matched_points <- purrr::map_dfr(time_seq, function(t_target) {
+    window <- df %>%
+      filter(abs(as.numeric(difftime(UTC_datetime, t_target, units = "secs"))) <= tolerance)
+
+    if (nrow(window) == 0) {
+      # Ligne vide avec NA + valeurs statiques
+      empty_row <- tibble(resampled_time = t_target)
+
+      # Ajouter les colonnes dynamiques (tout sauf static_cols et UTC_datetime)
+      dynamic_cols <- setdiff(names(df), c(static_cols, "UTC_datetime"))
+      for (col in dynamic_cols) {
+        empty_row[[col]] <- NA
+      }
+
+      # Ajouter les colonnes statiques avec leurs valeurs
+      for (col in static_cols) {
+        empty_row[[col]] <- static_values[[col]]
+      }
+
+      # Ajouter la colonne UTC_datetime à NA
+      empty_row$UTC_datetime <- NA
+
+      return(empty_row)
+    }
+
+    closest_row <- window %>%
+      slice_min(abs(as.numeric(difftime(UTC_datetime, t_target, units = "secs")))) %>%
+      mutate(resampled_time = t_target)
+
+    return(closest_row)
+  })
+
+  return(matched_points)
+}
+
+resample1 <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 1))
+
+resample2 <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 2))
+
+resample3 <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 3))
+
+resample4 <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 4))
+
+resample5 <- data_day_lowdelta %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 5))
+
+resample4bis <- data_day %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(~resample_60s_tolerance(.x, tolerance = 5, start_index = 4))
+
+#how many locs whithout NA
+resample1 %>%
+  filter(!is.na(X) & !is.na(Y)) %>%
+  summarise(n_valid = n()) 
+
+resample2 %>%
+  filter(!is.na(X) & !is.na(Y)) %>%
+  summarise(n_valid = n())
+
+resample3 %>%
+  filter(!is.na(X) & !is.na(Y)) %>%
+  summarise(n_valid = n())
+
+resample4 %>%
+  filter(!is.na(X) & !is.na(Y)) %>%
+  summarise(n_valid = n())
+
+resample5 %>%
+  filter(!is.na(X) & !is.na(Y)) %>%
+  summarise(n_valid = n())
+
+resample4bis %>%
+  filter(!is.na(X) & !is.na(Y)) %>%
+  summarise(n_valid = n())
+
+sum(is.na(resample4$X))
+
+data_1min <- resample4
+
+```
+
+
+## 1min Non linear interpolation in gaps = 2min (keep NA in others)
+
+
+More "realistic" interpolation method and/or account for the location uncertainty during the gaps. 
+This is what the crawlWrap (complicated : several parameters) and MIfitHMM functions are for.
+
+CRAWL intègre une modélisation réaliste des trajectoires et la prise en compte de l’erreur de mesure.
+Nécessite coordonnées projetées UTM
+2 different UTM zones
+
+
+```{r}
+#interpolate when there is only one consecutive NA
+#Split by pop
+data1minB <- data_1min %>% 
+  filter(pop == "B")
+
+data1minGL <- data_1min %>% 
+  filter(pop == "GL")
+
+## FUNCTIONS ##
+
+interpolate_small_gaps <- function(df) {
+  df <- df %>% arrange(resampled_time)
+
+  df <- df %>%
+    mutate(
+      valid = !(is.na(X) | is.na(Y)),
+      prev_valid = lag(valid),
+      next_valid = lead(valid),
+      is_single_na = !valid & prev_valid & next_valid
+    )
+
+  na_idx <- which(df$is_single_na)
+  if (length(na_idx) == 0) return(df)
+
+  # minimal df for crawl
+  df_crawl_input <- df %>%
+    select(device_id_date, resampled_time, X, Y) %>%
+    rename(ID = device_id_date, time = resampled_time)
+
+  # use of crawlWrap
+  crawl_result <- tryCatch({
+    crawlWrap(
+      obsData = df_crawl_input,
+      timeStep = "1 min",
+      coord = c("X", "Y"),
+      time.name = "time"
+    )
+  }, error = function(e) {
+    return(NULL)
+  })
+
+  # checking
+  if (is.null(crawl_result) || !"crwPredict" %in% names(crawl_result)) return(df)
+
+  predicted <- crawl_result$crwPredict
+
+  # Replace isolated NAs with predicted coordinates
+  df$X[na_idx] <- predicted$mu.x[na_idx]
+  df$Y[na_idx] <- predicted$mu.y[na_idx]
+
+  return(df)
+}
+
+can_run_crawl <- function(df) {
+  df <- df %>% arrange(resampled_time)
+
+  # At least 3 valid points + at least one NA
+  enough_points <- df %>% filter(!is.na(X) & !is.na(Y)) %>% nrow() >= 3
+  has_na <- any(is.na(df$X) | is.na(df$Y))
+
+  return(enough_points & has_na)
+}
+
+########
+
+data1min_interpoB <- data1minB %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(function(df) {
+    if (can_run_crawl(df)) {
+      interpolate_small_gaps(df)  
+    } else {
+      df  
+    }
+  })
+
+data1min_interpoGL <- data1minGL %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(function(df) {
+    if (can_run_crawl(df)) {
+      interpolate_small_gaps(df)  
+    } else {
+      df  
+    }
+  })
+
+
+colSums(is.na(data1min_interpoB))
+colSums(is.na(data1min_interpoGL))
+```
+
+##1min Check interpolations
+
+Check if interpolations are reliable
+```{r}
+#Spatial plots to see if interpolations are reliable
+data1min_interpoB %>%
+  filter(valid | is_single_na) %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  walk(function(df) {
+    gg <- ggplot(df %>% arrange(resampled_time)) +
+      geom_path(aes(x = X, y = Y), color = "grey70") +
+      geom_point(aes(x = X, y = Y, color = is_single_na)) +
+      scale_color_manual(values = c("FALSE" = "blue", "TRUE" = "red"),
+                         labels = c("Valide", "Interpolé"),
+                         name = "Type de point") +
+      coord_equal() +
+      labs(
+        title = paste("Trajectoire :", unique(df$device_id_date)),
+        x = "X", y = "Y"
+      ) +
+      theme_minimal()
+    
+    print(gg)
+    Sys.sleep(1)
+  })
+
+#Spatial plots to see if interpolations are reliable
+data1min_interpoGL %>%
+  filter(valid | is_single_na) %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  walk(function(df) {
+    gg <- ggplot(df %>% arrange(resampled_time)) +
+      geom_path(aes(x = X, y = Y), color = "grey70") +
+      geom_point(aes(x = X, y = Y, color = is_single_na)) +
+      scale_color_manual(values = c("FALSE" = "blue", "TRUE" = "red"),
+                         labels = c("Valide", "Interpolé"),
+                         name = "Type de point") +
+      coord_equal() +
+      labs(
+        title = paste("Trajectoire :", unique(df$device_id_date)),
+        x = "X", y = "Y"
+      ) +
+      theme_minimal()
+    
+    print(gg)
+    Sys.sleep(1)
+  })
+
+```
+
+## 1min Give an ID to each sequence
+```{r}
+
+assign_sequence_ids_no_na <- function(df) {
+  df <- df %>% arrange(resampled_time)
+
+  # Identify whether each line is valid (X or Y not NA)
+  df <- df %>%
+    mutate(is_valid = !(is.na(X) | is.na(Y)))
+
+  # Run Length Encoding 
+  rle_valid <- rle(df$is_valid)
+  lengths <- rle_valid$lengths
+  values <- rle_valid$values
+
+  group_ids <- rep(NA_integer_, nrow(df))
+  index <- 1
+  group_num <- 1
+
+  for (i in seq_along(lengths)) {
+    len <- lengths[i]
+    val <- values[i]
+
+    if (val) {
+      # Sequence is fully valid → it is assigned an ID
+      group_ids[index:(index + len - 1)] <- group_num
+      group_num <- group_num + 1
+    }
+    # If it is not valid (NA in X or Y), no ID is given.
+    index <- index + len
+  }
+
+  df <- df %>%
+    mutate(device_id_date_num = ifelse(is.na(group_ids), NA, paste0(device_id_date, "_", group_ids)))
+
+  return(df)
+}
+
+data1min_interpocutB <- data1min_interpoB %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(assign_sequence_ids_no_na)
+
+data1min_interpocutGL <- data1min_interpoGL %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(assign_sequence_ids_no_na)
+
+data1min_interpocutGL$device_id_date_num <- as.factor(data1min_interpocutGL$device_id_date_num)
+data1min_interpocutB$device_id_date_num <- as.factor(data1min_interpocutB$device_id_date_num)
+
+mean(is.na(data1min_interpocutB$device_id_date_num))  
+mean(is.na(data1min_interpocutGL$device_id_date_num)) 
+
+size_seqence <- data1min_interpocutB %>%
+  group_by(device_id_date_num) %>%
+  summarise(n = n(), .groups = "drop")
+
+size_seqence <- data1min_interpocutGL %>%
+  group_by(device_id_date_num) %>%
+  summarise(n = n(), .groups = "drop")
+
+#n = 10 data per sequence at least
+
+seq1min10GL <- data1min_interpocutGL %>%
+  filter(!device_id_date_num == "NA") %>%
+  group_by(device_id_date_num) %>%
+  filter(n() >= 10)
+seq1min10B <- data1min_interpocutB %>%
+  filter(!device_id_date_num == "NA") %>%
+  group_by(device_id_date_num) %>%
+  filter(n() >= 10)
+
+#No NA in X et Y
+colSums(is.na(seq1min10B))
+colSums(is.na(seq1min10GL))
+
+```
+
+## 1min convert XY to LL
+
+```{r}
+# Convert the new coordinates (interpolated or not) X and Y to Lon Lat for the next step.
+
+# Transform to longitude/latitude (EPSG:4326)
+# seq1min10Bll <- st_transform(seq1min10Bsf, crs = 4326)
+# seq1min10GLll <- st_transform(seq1min10GLsf, crs = 4326)
+# seq1min15Bll <- st_transform(seq1min15Bsf, crs = 4326)
+# seq1min15GLll <- st_transform(seq1min15GLsf, crs = 4326)
+# 
+# # Extract coordinates
+# coords <- st_coordinates(seq1min10Bll)
+# seq1min10B$lon <- coords[,1]
+# seq1min10B$lat <- coords[,2]
+# 
+# coords <- st_coordinates(seq1min10GLll)
+# seq1min10GL$lon <- coords[,1]
+# seq1min10GL$lat <- coords[,2]
+# 
+# colSums(is.na(seq1min10B)) #no na
+# colSums(is.na(seq1min10GL))
+# 
+# #Combine the two pop sets into one df
+# #Keep all columns except Latitude and Longitude
+# #Remove the Latitude and Longitude columns from both sets to avoid confusion
+# seq1min10B_clean <- seq1min10B %>% select(-Latitude, -Longitude)
+# seq1min10GL_clean <- seq1min10GL %>% select(-Latitude, -Longitude)
+# 
+# # Combined 
+# seq_all <- bind_rows(seq1min10B_clean, seq1min10GL_clean)#83810 rows
+# colSums(is.na(seq_all))
+```
+
+# HMM
+
+### Prepare Data
+```{r}
+#Data with at least 10 consecutive locs per sequence (tested with 15, not shown), and an ID per sequence (consecutive locs) 
+data1min_interpocutB <- data1min_interpoB %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(assign_sequence_ids_no_na)
+
+data1min_interpocutGL <- data1min_interpoGL %>%
+  group_by(device_id_date) %>%
+  group_split() %>%
+  map_dfr(assign_sequence_ids_no_na)
+
+data1min_interpocutGL$device_id_date_num <- as.factor(data1min_interpocutGL$device_id_date_num)
+data1min_interpocutB$device_id_date_num <- as.factor(data1min_interpocutB$device_id_date_num)
+
+#No NA remaining in X and Y
+dataforprep1min10GL <- seq1min10GL %>% 
+  select(device_id_date_num, resampled_time, X, Y) %>%
+  rename(ID = device_id_date_num, time = resampled_time) %>%
+  arrange(ID, time) %>% 
+  ungroup()
+
+dataforprep1min10B <- seq1min10B %>% 
+  select(device_id_date_num, resampled_time, X, Y) %>%
+  rename(ID = device_id_date_num, time = resampled_time) %>%
+  arrange(ID, time) %>% 
+  ungroup()
+
+colSums(is.na(dataforprep1min10GL)) 
+colSums(is.na(dataforprep1min10B)) #no NA
+
+dataforprep1min10GL <- as.data.frame(dataforprep1min10GL)
+dataforprep1min10B <- as.data.frame(dataforprep1min10B)
+
+#with covariates
+
+#pop, sex
+dataforprep1min10covGL <- seq1min10GL %>% 
+  select(device_id_date_num, resampled_time, X, Y, sex, pop) %>%
+  rename(ID = device_id_date_num, time = resampled_time) %>%
+  arrange(ID, time) %>% 
+  ungroup()
+dataforprep1min10covGL <- as.data.frame(dataforprep1min10covGL)
+
+dataforprep1min10covB <- seq1min10B %>% 
+  select(device_id_date_num, resampled_time, X, Y, sex, pop) %>%
+  rename(ID = device_id_date_num, time = resampled_time) %>%
+  arrange(ID, time) %>% 
+  ungroup()
+dataforprep1min10covB <- as.data.frame(dataforprep1min10covB)
+
+###
+
+#according to Theo Michelot & Roland Langrock May 8, 2023 (prepData is only used with regular data)
+prep1min10GL <- prepData(data = dataforprep1min10GL, type = "UTM", coordNames = c("X", "Y"))
+prep1min10B <- prepData(data = dataforprep1min10B, type = "UTM", coordNames = c("X", "Y"))
+
+#autocorrelation : we can check the autocorrelation function to see if our step lengths show cyclical pattern (they don't)
+acf(prep1min10GL$step[!is.na(prep1min10GL$step)],lag.max=100)
+acf(prep1min10B$step[!is.na(prep1min10B$step)],lag.max=100)
+plot(prep1min10GL) #step length 0-500, turning angles  = -pi - pi (for each individual)
+summary(prep1min10GL$step) #mean = 73m, max = 1.1km
+sd(prep1min10GL$step, na.rm = T) #sd = 112m
+summary(prep1min10GL$angle) #mean = 0, med =0
+sd(prep1min10GL$angle, na.rm = T) #2.04
+
+plot(prep1min10B)
+summary(prep1min10B$step)# mean = 69, max = 0.9km
+sd(prep1min10B$step, na.rm = T) #sd = 136.5 m
+summary(prep1min10B$angle)
+sd(prep1min10B$angle, na.rm = T) #sd = 2.10
+#drome tuto Marie Gilbertson 2023-05-04 https://mjones029.github.io/Tutorials/HMM_tutorial.html
+
+```
+
+### Remove NA 
+(limit the number of NA even if their occurence is not a problem, limit potential bias)
+```{r}
+#GL
+length(unique(prep1min10GL$ID)) #device_annee_mois_jour_numseq
+colSums(is.na(prep1min10GL)) #for the first and las loc of the day
+attr(prep1min10GL, "class")
+inherits(prep1min10GL, "momentuHMMData")
+
+#NA = first of agroupeID ?
+prep1min10GL %>%
+  group_by(ID) %>%
+  mutate(row = row_number()) %>%
+  filter(row == 1 | lag(is.na(step)) | is.na(step)) %>%
+  select(ID, row, time, step, angle) %>%
+  arrange(ID, row)
+
+# The first in each sequence has NA for the angle.
+# And the last in each sequence has NA for step and angle.
+
+### Remove the first and last of each sequence
+
+prep1min10cleanGL <- prep1min10GL %>%
+  arrange(ID, time) %>%
+  group_by(ID) %>%
+  mutate(row = row_number(), last_row = n()) %>%
+  filter(row != 1 & row != last_row) %>%
+  ungroup() %>%
+  select(-row, -last_row)
+
+colSums(is.na(prep1min10cleanGL)) # 39 NA ok
+
+#keep the proper class (and the attributes)
+inherits(prep1min10GL, "momentuHMMData")
+inherits(prep1min10cleanGL, "momentuHMMData")
+class(prep1min10cleanGL) <- c("momentuHMMData", class(prep1min10cleanGL))
+inherits(prep1min10cleanGL, "momentuHMMData")
+
+
+#B do the same steps
+length(unique(prep1min10B$ID)) 
+colSums(is.na(prep1min10B)) 
+attr(prep1min10B, "class")
+inherits(prep1min10B, "momentuHMMData")
+
+prep1min10B %>%
+  group_by(ID) %>%
+  mutate(row = row_number()) %>%
+  filter(row == 1 | lag(is.na(step)) | is.na(step)) %>%
+  select(ID, row, time, step, angle) %>%
+  arrange(ID, row)
+
+prep1min10cleanB <- prep1min10B %>%
+  arrange(ID, time) %>%
+  group_by(ID) %>%
+  mutate(row = row_number(), last_row = n()) %>%
+  filter(row != 1 & row != last_row) %>%
+  ungroup() %>%
+  select(-row, -last_row)
+
+colSums(is.na(prep1min10cleanB)) 
+inherits(prep1min10B, "momentuHMMData")
+inherits(prep1min10cleanB, "momentuHMMData")
+class(prep1min10cleanB) <- c("momentuHMMData", class(prep1min10cleanGL))
+inherits(prep1min10cleanB, "momentuHMMData")
+```
+
+
+
+### Params distribution
+```{r}
+#GL
+#--STEP LENGTH----
+
+# Plot histogram of step lengths 
+hist(prep1min10cleanGL$step, xlab = "step length (m)", main = "", breaks = 50, xlim = c(0, 500)) #in meters (UTM)
+#asymetric, try in log sclae
+hist(log(prep1min10cleanGL$step + 1), breaks = 100, main = "Step length en log", xlab = "log(step length + 1)",  xlim = c(0, 30))
+  #1 mode around 0m nd one around 150m
+
+hist(log(prep1min10cleanGL$step + 1e-3),   # avoid log(0)
+     breaks = 100,
+     main = "Step length (log-transformé) GL",
+     xlab = "log(step length)",
+     freq = FALSE)   # densité plutôt que fréquences
+lines(density(log(prep1min10cleanGL$step + 1e-3)), col = "red", lwd = 2)
+#Two modes: at 0 and 162m (exp(-1.8))
+
+#look at density
+x <- log(prep1min10cleanGL$step + 1)
+d <- density(x, na.rm = TRUE)
+plot(d,
+     main = "Density of log(step length + 1)",
+     xlab = "log(step length + 1)")
+
+# local maximum
+modes_idx <- which(diff(sign(diff(d$y))) == -2)
+
+# modes on the log axis
+modes_log <- d$x[modes_idx]
+modes_log
+
+modes_m <- exp(modes_log) - 1
+modes_m #1.922605 186.927292
+
+#-- TURNING ANGLES----
+hist(prep1min10cleanGL$angle, breaks = seq(-pi, pi, length = 15), xlab = "angle", main = "")
+
+hist(prep1min10cleanGL$angle,
+     breaks = seq(-pi, pi, length = 30),
+     xlab = "Turning angle (rad)",
+     main = "Distribution des angles",
+     freq = FALSE)
+
+summary(prep1min10cleanGL$step)
+ # Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+ #   0.000    1.846    4.654   73.432  124.383 1140.855 
+summary(prep1min10cleanGL$angle)
+#  Min.    1st Qu.     Median       Mean    3rd Qu.       Max.       NA's 
+# -3.1415927 -1.9315975  0.0000232  0.0087748  1.9494781  3.1415927         16 
+
+#B
+#--STEP LENGTH----
+
+# Plot histogram of step lengths 
+hist(prep1min10cleanB$step, xlab = "step length (m)", main = "", breaks = 50, xlim = c(0, 500)) #in meters (UTM)
+hist(log(prep1min10cleanB$step + 1), breaks = 100, main = "Step length en log", xlab = "log(step length + 1)",  xlim = c(0, 12))
+#1 mode around 0m nd one around 150m
+
+#look at density
+hist(log(prep1min10cleanB$step + 1e-3), 
+     breaks = 100,
+     main = "Step length (log-transformed) B",
+     xlab = "log(step length)",
+     freq = FALSE)  
+lines(density(log(prep1min10cleanB$step + 1e-3)), col = "red", lwd = 2)
+
+#or
+x <- log(prep1min10cleanB$step + 1)
+d <- density(x, na.rm = TRUE)
+plot(d,
+     main = "Density of log(step length + 1)",
+     xlab = "log(step length + 1)")
+
+# local maximum
+modes_idx <- which(diff(sign(diff(d$y))) == -2)
+
+# modes on the log axis
+modes_log <- d$x[modes_idx]
+modes_log
+
+modes_m <- exp(modes_log) - 1
+modes_m #1.812388 95.474015
+
+summary(prep1min10cleanB$angle)
+#  Min.   1st Qu.    Median      Mean   3rd Qu.      Max.      NA's 
+# -3.141593 -2.111989 -0.008801 -0.013795  2.083177  3.141593        23 
+
+summary(prep1min10cleanB$step)
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   0.000   1.756   4.340  69.776  70.112 994.516 
+
+#-- TURNING ANGLES----
+hist(prep1min10cleanB$angle, breaks = seq(-pi, pi, length = 15), xlab = "angle", main = "")
+
+hist(prep1min10cleanB$angle,
+     breaks = seq(-pi, pi, length = 30),
+     xlab = "Turning angle (rad)",
+     main = "Distribution des angles",
+     freq = FALSE)
+
+#Compare angles bteween study areas
+df_angles <- bind_rows(
+  prep1min10cleanGL %>% mutate(pop = "GL"),
+  prep1min10cleanB  %>% mutate(pop = "B")
+)
+
+# Histograms
+ggplot(df_angles, aes(x = angle, fill = pop)) +
+  geom_histogram(
+    aes(y = ..density..),
+    breaks = seq(-pi, pi, length.out = 30),
+    alpha = 0.5,
+    position = "identity",
+    color = "black"
+  ) +
+  scale_fill_manual(values = c("GL" = "steelblue", "B" = "orange")) +
+  labs(
+    x = "Turning angle (rad)",
+    y = "Density",
+    fill = "Study area
+  "
+  ) +
+  theme_classic()
+
+#density
+ggplot(df_angles, aes(x = angle, fill = pop, colour = pop)) +
+  geom_density(alpha = 0.4, linewidth = 0.6) +
+  scale_x_continuous(
+    limits = c(-pi, pi),
+    breaks = c(-pi, -pi/2, 0, pi/2, pi),
+    labels = c("-π", "-π/2", "0", "π/2", "π")
+  ) +
+  scale_y_continuous(limits = c(0, 0.35)) +
+  scale_fill_manual(values = c("B" = "grey50", "GL" = "steelblue3")) +
+  scale_colour_manual(values = c("B" = "grey30", "GL" = "steelblue4")) +
+  labs(
+    title = "Turning angle distributions",
+    x = "Turning angle (rad)",
+    y = "Density",
+    fill = "Study area",
+    colour = "Study area"
+  ) +
+  theme_minimal()
+
+
+#Idem with step length
+df_step <- bind_rows(
+  prep1min10cleanGL %>% mutate(pop = "GL"),
+  prep1min10cleanB  %>% mutate(pop = "B")
+)
+
+# Histograms
+ggplot(df_step, aes(x = step, fill = pop)) +
+  geom_histogram(
+    aes(y = ..density..),
+    alpha = 0.5,
+    position = "identity",
+    color = "black"
+  ) +
+  scale_fill_manual(values = c("GL" = "steelblue", "B" = "orange")) +
+  labs(
+    x = "Step length",
+    y = "Density",
+    fill = "Study area
+  "
+  ) +
+  theme_classic()
+
+ggplot(df_step, aes(x = step, fill = pop)) +
+  geom_histogram(
+    aes(y = ..density..),
+    alpha = 0.5,
+    position = "identity",
+    color = "black",
+  ) +
+  scale_fill_manual(values = c("GL" = "steelblue", "B" = "orange")) +
+  labs(
+    x = "Step length",
+    y = "Density",
+    fill = "Study area
+  "
+  ) +
+  theme_classic()
+
+#density
+ggplot(df_step, aes(x = step, fill = pop, colour = pop)) +
+  geom_density(alpha = 0.4, linewidth = 0.6) +
+  scale_x_continuous(
+    limits = c(-0.3,15)
+  ) +
+  #scale_y_continuous(limits = c(0, 0.35)) +
+  scale_fill_manual(values = c("B" = "grey50", "GL" = "steelblue3")) +
+  scale_colour_manual(values = c("B" = "grey30", "GL" = "steelblue4")) +
+  labs(
+    title = "Step length (km), limited to 0-15km",
+    x = "Step length (km)",
+    y = "Density",
+    fill = "Study area",
+    colour = "Study area"
+  ) +
+  theme_minimal()
+
+```
+
+Models with 2-4-5 states not shown : follow the same process
+
+## HMM GL 3 states, gamma vm -> not the optimal one
+Initial values (fixed)
+
+```{r}
+
+stepMean0 <- c(m1 = 5, m2 =580, m3 = 167) # initial means (one for each state) 
+stepSD0 <- c(5,580, 167 ) # initial standard deviations (one for each state) 
+stepPar0 <- c(stepMean0, stepSD0)
+#Distribution = usually Gamma
+
+# Starting values for the turning angle parameters 
+angleMean0 <- c(3.14, 0, 1.57) # initial means (one for each state) in radians (-pi;pi) 
+angleCon0 <- c(rho1 = 0.1, rho2 = 0.8, rho = 0.2) # initial concentrations (one for each state) 
+anglePar0 <- c(angleMean0, angleCon0)
+
+#3 states model
+stateNames <- c("resident","transit", "foraging")
+zeromass <- c(0.0002, 0.0002, 0.0002) 
+
+#with Von mises distribution for turning angles
+Par0 <- list(step=c(stepMean0, stepSD0, zeromass), angle = c(angleMean0, angleCon0))
+dist <- list(step = "gamma", angle = "vm")
+#other possibility for turning angles "wrpcauchy"
+
+fitted_modelGL <- fitHMM(data = prep1min10cleanGL, nbStates = 3, dist = dist, Par0 = Par0, stateNames = stateNames, estAngleMean = list(angle=TRUE), retryFits = 10)
+
+print(fitted_modelGL) #likelihood (à maximiser) -210887
+
+AIC(fitted_modelGL)
+
+plot(fitted_modelGL, plotCI = TRUE)
+#1 fitted distribution for the two states and total (gamma)
+#2 wrapped distribution (concentration parameter)
+#3 mapped states
+
+#check if another state is needed
+hmm_statesGL <- viterbi(fitted_modelGL)
+#For a given model, reconstructs the most probable states sequence, using the Viterbi algorithm.
+
+table(hmm_statesGL)/nrow(prep1min10cleanGL)
+#globally
+
+#from tuto mjones
+# model fit can be assessed using the pseudo-residuals (e.g., residual autocorrelation fucntion plot below)
+# compute pseudo-residuals for the steps and the angles
+pr <- pseudoRes(fitted_modelGL)
+# plot the ACF of step pseudo-residuals
+acf(pr$stepRes[!is.na(pr$stepRes)],lag.max = 100) 
+acf(pr$angleRes[is.finite(pr$angleRes)], lag.max = 100)#ok
+
+#################### CHECK
+
+prep1min10cleanGL$state <- hmm_statesGL
+datastatesGL <- prep1min10cleanGL
+datastatesGL$device <- sub("_.*", "", datastatesGL$ID) #extract device_id
+datastatesGL$device_day <-  sub("^([^_]+_[^_]+).*", "\\1", datastatesGL$ID) #concatenate day and device_id
+
+#proportion of each behaviour per individual_day, then averaged for the individual
+  
+# 1. 
+etat_par_jour <- datastatesGL %>%
+  group_by(device_day, device, state) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(device_day, device) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+# 2.
+etat_moyen_par_individu <- etat_par_jour %>%
+  group_by(device, state) %>%
+  summarise(mean_prop = mean(prop), .groups = "drop") %>%
+  arrange(device, state)
+
+#Daily mean proportion of each state per individual
+ggplot(etat_moyen_par_individu, aes(x = factor(device), y = mean_prop, fill = factor(state))) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    x = "Individual (device)",
+    y = "Mean proportion",
+    fill = "State"
+  ) +
+  theme_minimal()
+
+# 3. Globally
+etat_moyen_global <- etat_moyen_par_individu %>%
+  group_by(state) %>%
+  summarise(mean_prop_all_individuals = mean(mean_prop), .groups = "drop")
+
+# add the study area indormation
+datastatesall <- datastatesGL %>%
+  mutate(pop = "GL")
+#to later compare withe the brenne
+
+################## Maps for some examples
+
+# Select a sequence
+id_select <- "243698_2024-06-11_5"
+
+prep_id <- subset(datastatesGL, ID == id_select)
+
+# Conversion sf to UTM 31N the, WGS84
+prep_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32630) %>%
+  st_transform(4326)
+
+# Name the states
+# stateNames <- c("Stationnaire", "Transit", "Foraging")
+stateColors <- c("1" = "#F1C40F",
+                 "3" = "#3498DB",
+                 "2" = "#2ECC71")
+
+# Add states
+prep_sf$stateName <- factor(prep_sf$state,
+                            levels = 1:3,
+                            labels = c("1", "2", "3"))
+
+# Line connecting points in chronological order
+prep_line <- prep_sf %>%
+  arrange(time) %>%
+  summarise(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+# Interactive mode
+tmap_mode("view")
+
+tm_shape(prep_line) +
+  tm_lines(col = "grey60", lwd = 1.2) +
+tm_shape(prep_sf) +
+  tm_symbols(
+    col = "stateName",
+    palette = stateColors,
+    size = 0.4,           
+    border.lwd = 0.3,
+    alpha = 0.9,
+    popup.vars = c("État" = "stateName")
+  ) +
+  tm_layout(
+    title = paste("Séquence", id_select),
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+
+ggplot(prep1min10cleanGL, aes(x = step, fill = factor(hmm_statesGL))) +
+  geom_density(alpha = 0.5) +
+  scale_x_log10() +
+  theme_minimal()
+
+ggplot(prep1min10cleanGL, aes(x = angle, fill = factor(hmm_statesGL))) +
+  geom_density(alpha = 0.5) +
+  theme_minimal()
+
+
+###### Try other sets of initial parameters
+tryList <- list(
+  list(step = c(5, 400, 120, 5, 400, 120, 0.0002, 0.0002, 0.0002),
+       angle = c(3.14, 0, 1.57, 0.3, 0.8, 0.2)),
+  list(step = c(10, 300, 150, 10, 300, 150, 0.0002, 0.0002, 0.0002),
+       angle = c(3.14, 0, 1.57, 0.5, 0.8, 0.3))
+)
+
+fits <- lapply(tryList, function(Par0) {
+  fitHMM(data = prep1min10cleanGL, nbStates = 3,
+         dist = list(step = "gamma", angle = "vm"),
+         Par0 = Par0, stateNames = stateNames,
+         estAngleMean = list(angle = TRUE))
+})
+
+
+logLik_vec <- sapply(fits, function(fit) {
+  if (!is.null(fit)) -fit$mod$minimum else NA
+})
+
+# AIC
+AIC_vec <- sapply(fits, function(fit) {
+  if (!is.null(fit)) AIC(fit) else NA
+})
+
+# Créer le dataframe
+comparison_df <- data.frame(
+  run = seq_along(fits),
+  logLik = logLik_vec,
+  AIC = AIC_vec
+)
+
+#Convergence to the same optimal parameters
+```
+
+### HMM GL 3 states, gamma WC --> Optimal one
+Same initial values (fixed), change the distribution law for turning angles
+
+```{r}
+
+stepMean0 <- c(m1 = 5, m2 =580, m3 = 167) # initial means (one for each state) 
+stepSD0 <- c(5,580, 167 ) # initial standard deviations (one for each state) 
+stepPar0 <- c(stepMean0, stepSD0)
+#Distribution = usually Gamma
+
+# Starting values for the turning angle parameters 
+angleMean0 <- c(3.14, 0, 1.57) # initial means (one for each state) in radians (-pi;pi) 
+angleCon0 <- c(rho1 = 0.1, rho2 = 0.8, rho = 0.2) # initial concentrations (one for each state) 
+anglePar0 <- c(angleMean0, angleCon0)
+
+#3 states model
+stateNames <- c("resident","transit", "foraging")
+zeromass <- c(0.0002, 0.0002, 0.0002) 
+
+#with Von mises distribution for turning angles
+Par0 <- list(step=c(stepMean0, stepSD0, zeromass), angle = c(angleMean0, angleCon0))
+dist <- list(step = "gamma", angle = "wrpcauchy")
+#other possibility for turning angles "wrpcauchy"
+
+fitted_modelGL2 <- fitHMM(data = prep1min10cleanGL, nbStates = 3, dist = dist, Par0 = Par0, stateNames = stateNames, estAngleMean = list(angle=TRUE), retryFits = 10)
+
+print(fitted_modelGL2) #likelihood (maximise)
+
+AIC(fitted_modelGL2)
+
+plot(fitted_modelGL2, plotCI = TRUE)
+#1 fitted distribution for the two states and total (gamma)
+#2 wrapped distribution (concentration parameter)
+#3 mapped states
+
+#check if another state is needed
+hmm_statesGL2 <- viterbi(fitted_modelGL2)
+#For a given model, reconstructs the most probable states sequence, using the Viterbi algorithm.
+
+table(hmm_statesGL2)/nrow(prep1min10cleanGL)
+
+#from tuto mjones
+# model fit can be assessed using the pseudo-residuals (e.g., residual autocorrelation fucntion plot below)
+# compute pseudo-residuals for the steps and the angles
+pr <- pseudoRes(fitted_modelGL2)
+# plot the ACF of step pseudo-residuals
+acf(pr$stepRes[!is.na(pr$stepRes)],lag.max = 100) 
+acf(pr$angleRes[is.finite(pr$angleRes)], lag.max = 100)
+
+#################### CHECK
+prep1min10cleanGL2 <- prep1min10cleanGL
+prep1min10cleanGL2$state <- hmm_statesGL2
+datastatesGL2 <- prep1min10cleanGL2
+datastatesGL2$device <- sub("_.*", "", datastatesGL2$ID) #extract device_id
+datastatesGL2$device_day <-  sub("^([^_]+_[^_]+).*", "\\1", datastatesGL2$ID)
+
+# 1. 
+etat_par_jour2 <- datastatesGL2 %>%
+  group_by(device_day, device, state) %>% 
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(device_day, device) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+# 2. 
+etat_moyen_par_individu2 <- etat_par_jour2GL %>%
+  group_by(device, state) %>%
+  summarise(mean_prop = mean(prop), .groups = "drop") %>%
+  arrange(device, state)
+
+ggplot(etat_moyen_par_individu2, aes(x = factor(device), y = mean_prop, fill = factor(state))) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    x = "Individu (device)",
+    y = "Proportion moyenne",
+    fill = "État comportemental"
+  ) +
+  theme_minimal()
+
+# 3. globally
+etat_moyen_global2 <- etat_moyen_par_individu2 %>%
+  group_by(state) %>%
+  summarise(mean_prop_all_individuals = mean(mean_prop), .groups = "drop")
+
+# add study area information
+datastatesall2 <- datastatesGL2 %>%
+  mutate(pop = "GL")
+
+#Maps for some examples
+id_select <- "243698_2024-06-11_5"
+
+prep_id <- subset(datastatesGL2, ID == id_select)
+
+# Conversion sf to UTM 31N then WGS84
+prep_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32630) %>%
+  st_transform(4326)
+
+stateNames <- c("Stationnaire", "Transit", "Foraging")
+stateColors <- c("Stationnaire" = "#F1C40F",
+                 "Transit" = "#3498DB",
+                 "Foraging" = "#2ECC71")
+
+prep_sf$stateName <- factor(prep_sf$state,
+                            levels = 1:3,
+                            labels = stateNames)
+
+prep_line <- prep_sf %>%
+  arrange(time) %>%
+  summarise(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+
+tmap_mode("view")
+tm_shape(prep_line) +
+  tm_lines(col = "grey60", lwd = 1.2) +
+tm_shape(prep_sf) +
+  tm_symbols(
+    col = "stateName",
+    palette = stateColors,
+    size = 0.4,           # plus gros points visibles
+    border.lwd = 0.3,
+    alpha = 0.9,
+    popup.vars = c("État" = "stateName")
+  ) +
+  tm_layout(
+    title = paste("Séquence", id_select),
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+
+
+### With previous and following sequences
+
+id_select <- "243700_2024-06-12_10"
+id_select <- "243698_2024-06-16_10"
+
+id_root <- sub("_[0-9]+$", "", id_select)
+
+prep_id <- datastatesGL2 %>%
+  dplyr::filter(grepl(id_root, ID))
+
+# Conversion sf to UTM 31N the, WGS84
+prep_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32630) %>%
+  st_transform(4326)
+
+# Name the states
+# stateNames <- c("Stationnaire", "Transit", "Foraging")
+stateColors <- c("1" = "#F1C40F",
+                 "3" = "#3498DB",
+                 "2" = "#2ECC71")
+
+# Add states
+prep_sf$stateName <- factor(prep_sf$state,
+                            levels = 1:3,
+                            labels = c("1", "3", "2"))
+
+# Line connecting points in chronological order
+prep_line <- prep_sf %>%
+  arrange(time) %>%
+  summarise(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+# Interactive mode
+tmap_mode("view")
+
+tm_shape(prep_line) +
+  tm_lines(col = "grey60", lwd = 1.2) +
+tm_shape(prep_sf) +
+  tm_symbols(
+    col = "stateName",
+    palette = stateColors,
+    size = 0.4,           
+    border.lwd = 0.3,
+    alpha = 0.9,
+    popup.vars = c("État" = "stateName")
+  ) +
+  tm_layout(
+    title = paste("Séquence", id_select),
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+
+
+#density plots
+ggplot(prep1min10cleanGL2, aes(x = step, fill = factor(hmm_statesGL2))) +
+  geom_density(alpha = 0.5) +
+  scale_x_log10() +
+  theme_classic()
+
+ggplot(prep1min10cleanGL2, aes(x = angle, fill = factor(hmm_statesGL2))) +
+  geom_density(alpha = 0.5) +
+  theme_classic()
+
+#probably:
+#red = stationnary
+#blue = ARS
+#green = extensive movement
+resu <- datastatesGL2 %>% group_by(state) %>% summarize(mean_step = mean(step), sd_step = sd(step), mean_angle = mean(angle), sd_angle = sd(angle))
+
+```
+
+##### Additionnal representations
+Plot on satellite map
+
+```{r}
+#plot eeach individual-day
+
+# ID sélectionné
+id_select <- "243697_2024-06-16_7"
+id_root <- sub("_.*", "", id_select)
+prep_id <- datastatesGL2 %>%
+  dplyr::filter(grepl(id_root, ID))
+
+prep_id$day <- sub(".*_(\\d{4}-\\d{2}-\\d{2})_.*", "\\1", prep_id$ID)
+
+counts <- prep_id %>%
+  count(day)
+
+prep_id <- prep_id %>%
+  left_join(counts, by = "day")
+
+prep_id$day_label <- paste0(prep_id$day, " (n = ", prep_id$n, ")")
+
+prep_id$day_label <- factor(
+  prep_id$day_label,
+  levels = unique(prep_id$day_label[order(prep_id$day)])
+)
+
+# Transformer en sf
+prep_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32630) %>%
+  st_transform(4326)
+
+prep_sf$state <- as.character(prep_sf$state)
+prep_sf$state <- as.factor(prep_sf$state)
+
+# Mode interactif
+tmap_mode("view")
+
+# Carte
+tm_shape(prep_sf) +
+  tm_dots(
+    col = "state",
+    palette = c("1" = "#F1C40F",
+                "2" = "#2ECC71",
+                "3" = "#3498DB"),
+    size = 0.4,
+    alpha = 0.9
+  ) +
+  tm_facets(by = "day_label", free.coords = FALSE) +
+  tm_layout(legend.outside = TRUE)
+
+tm
+
+
+
+###################### Final version Qgis
+
+# --- 1. Select individual_day ---
+id_select <- "243697_2024-06-10"
+
+prep_id <- datastatesGL2 %>%
+  filter(device_day == id_select) %>%
+  arrange(time)
+
+# --- 2. SEGMENTS (t → t+1) ---
+segments <- prep_id %>%
+  mutate(
+    x_end = lead(x),
+    y_end = lead(y),
+    state_end = lead(state),
+    time_end = lead(time)
+  ) %>%
+  filter(!is.na(x_end))
+
+# --- 3. LINES sf ---
+lines_sf <- segments %>%
+  rowwise() %>%
+  mutate(
+    geometry = st_sfc(
+      st_linestring(
+        matrix(c(x, y, x_end, y_end), ncol = 2, byrow = TRUE)
+      ),
+      crs = 32630
+    )
+  ) %>%
+  st_as_sf() %>%
+  st_transform(4326)
+
+# --- 4. POINTS sf ---
+points_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32630) %>%
+  st_transform(4326)
+
+# --- 5. For QGIS ---
+
+# Points : state en facteur/texte
+points_sf$state_f <- as.factor(points_sf$state)
+
+# Lignes : state de départ + arrivée
+lines_sf$state_start <- as.factor(lines_sf$state)
+lines_sf$state_end   <- as.factor(lines_sf$state_end)
+lines_sf$segment_id <- 1:nrow(lines_sf)
+
+
+tmap_mode("view")
+
+tm_shape(lines_sf) +
+  tm_lines(
+    col = "state_end",   # état du point d’arrivée
+    palette = stateColors,
+    lwd = 1.2
+  ) +
+tm_shape(points_sf) +
+  tm_symbols(
+    fill = "state",
+    fill.scale = tm_scale(values = stateColors),
+    size = 0.4,
+    border.lwd = 0.3,
+    fill_alpha = 0.9
+  ) +
+tm_layout(
+  title = id_select,
+  legend.outside = TRUE,
+  frame = FALSE
+)
+
+```
+
+### HMM B 3 states, gamma vm ->  not the optimal one
+Same initial values (fixed)
+
+```{r}
+
+stepMean0 <- c(m1 = 5, m2 =580, m3 = 167) # initial means (one for each state) 
+stepSD0 <- c(5,580, 167 ) # initial standard deviations (one for each state) 
+stepPar0 <- c(stepMean0, stepSD0)
+#Distribution = usually Gamma
+
+# Starting values for the turning angle parameters 
+angleMean0 <- c(3.14, 0, 1.57) # initial means (one for each state) in radians (-pi;pi) 
+angleCon0 <- c(rho1 = 0.1, rho2 = 0.8, rho = 0.2) # initial concentrations (one for each state) 
+anglePar0 <- c(angleMean0, angleCon0)
+
+#3 states model
+stateNames <- c("resident","transit", "foraging")
+zeromass <- c(0.0002, 0.0002, 0.0002) 
+
+#with Von mises distribution for turning angles
+Par0 <- list(step=c(stepMean0, stepSD0, zeromass), angle = c(angleMean0, angleCon0))
+dist <- list(step = "gamma", angle = "vm")
+#other possibility for turning angles "wrpcauchy"
+
+fitted_modelB <- fitHMM(data = prep1min10cleanB, nbStates = 3, dist = dist, Par0 = Par0, stateNames = stateNames, estAngleMean = list(angle=TRUE), retryFits = 10)
+
+print(fitted_modelB) #likelihood (à maximiser) -230741.5
+
+AIC(fitted_modelB) #461528.9
+
+plot(fitted_modelB, plotCI = TRUE)
+#1 fitted distribution for the two states and total (gamma)
+#2 wrapped distribution (concentration parameter)
+#3 mapped states
+
+#check if another state is needed
+hmm_statesB <- viterbi(fitted_modelB)
+#For a given model, reconstructs the most probable states sequence, using the Viterbi algorithm.
+
+table(hmm_statesB)/nrow(prep1min10cleanB)
+
+#from tuto mjones
+# model fit can be assessed using the pseudo-residuals (e.g., residual autocorrelation fucntion plot below)
+# compute pseudo-residuals for the steps and the angles
+pr <- pseudoRes(fitted_modelB)
+# plot the ACF of step pseudo-residuals
+acf(pr$stepRes[!is.na(pr$stepRes)],lag.max = 100) #very nice
+acf(pr$angleRes[is.finite(pr$angleRes)], lag.max = 100)#ok
+
+#################### CHECK
+
+prep1min10cleanB$state <- hmm_statesB
+datastatesB <- prep1min10cleanB
+datastatesB$device <- sub("_.*", "", datastatesB$ID) #extract device_id
+datastatesB$device_day <-  sub("^([^_]+_[^_]+).*", "\\1", datastatesB$ID) #concatenate the day and device_id
+
+#Compute the mean daily proportion of each state per individual
+  
+# 1. 
+etat_par_joB <- datastatesB %>%
+  group_by(device_day, device, state) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(device_day, device) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+# 2. 
+etat_moyen_par_indiviB <- etat_par_joB %>%
+  group_by(device, state) %>%
+  summarise(mean_prop = mean(prop), .groups = "drop") %>%
+  arrange(device, state)
+
+ggplot(etat_moyen_par_indiviB, aes(x = factor(device), y = mean_prop, fill = factor(state))) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    x = "Individu (device)",
+    y = "Proportion moyenne",
+    fill = "État comportemental"
+  ) +
+  theme_minimal()
+
+# 3. globally
+etat_moyen_globB <- etat_moyen_par_indiviB %>%
+  group_by(state) %>%
+  summarise(mean_prop_all_individuals = mean(mean_prop), .groups = "drop")
+
+datastatesB <- datastatesB %>% mutate(pop = "B")
+
+# add the study area information
+datastatesall <- bind_rows(datastatesall, datastatesB)
+
+
+ggplot(prep1min10cleanB, aes(x = step, fill = factor(hmm_statesB))) +
+  geom_density(alpha = 0.5) +
+  scale_x_log10() +
+  theme_minimal()
+
+ggplot(prep1min10cleanB, aes(x = angle, fill = factor(hmm_statesB))) +
+  geom_density(alpha = 0.5) +
+  theme_minimal()
+
+################## Maps for some examples
+
+# Select a sequence
+id_select <- "243695_2024-06-10_9"
+
+prep_id <- subset(datastatesB, ID == id_select)
+
+# Conversion sf to UTM 31N then WGS84
+prep_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32631) %>%
+  st_transform(4326)
+
+# Name the states
+stateNames <- c("Stationnaire", "Transit", "Foraging")
+stateColors <- c("Stationnaire" = "#F1C40F",
+                 "Transit" = "#3498DB",
+                 "Foraging" = "#2ECC71")
+
+# add the states
+prep_sf$stateName <- factor(prep_sf$state,
+                            levels = 1:3,
+                            labels = stateNames)
+
+prep_line <- prep_sf %>%
+  arrange(time) %>%
+  summarise(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+tmap_mode("view")
+tm_shape(prep_line) +
+  tm_lines(col = "grey60", lwd = 1.2) +
+tm_shape(prep_sf) +
+  tm_symbols(
+    col = "stateName",
+    palette = stateColors,
+    size = 0.4,           
+    border.lwd = 0.3,
+    alpha = 0.9,
+    popup.vars = c("État" = "stateName")
+  ) +
+  tm_layout(
+    title = paste("Séquence", id_select),
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+
+```
+
+### HMM B 3 states, gamma WC
+Same initial values (fixed)
+
+```{r}
+
+stepMean0 <- c(m1 = 5, m2 =580, m3 = 167) # initial means (one for each state) 
+stepSD0 <- c(5,580, 167 ) # initial standard deviations (one for each state) 
+stepPar0 <- c(stepMean0, stepSD0)
+#Distribution = usually Gamma
+
+# Starting values for the turning angle parameters 
+angleMean0 <- c(3.14, 0, 1.57) # initial means (one for each state) in radians (-pi;pi) 
+angleCon0 <- c(rho1 = 0.1, rho2 = 0.8, rho = 0.2) # initial concentrations (one for each state) 
+anglePar0 <- c(angleMean0, angleCon0)
+
+#3 states model
+stateNames <- c("resident","transit", "foraging")
+zeromass <- c(0.0002, 0.0002, 0.0002) 
+
+Par0 <- list(step=c(stepMean0, stepSD0, zeromass), angle = c(angleMean0, angleCon0))
+dist <- list(step = "gamma", angle = "wrpcauchy")
+#other possibility for turning angles "wrpcauchy"
+
+fitted_modelB2 <- fitHMM(data = prep1min10cleanB, nbStates = 3, dist = dist, Par0 = Par0, stateNames = stateNames, estAngleMean = list(angle=TRUE), retryFits = 10)
+
+print(fitted_modelB2)
+
+AIC(fitted_modelB2) # 459829.8
+
+plot(fitted_modelB2, plotCI = TRUE)
+
+hmm_statesB2 <- viterbi(fitted_modelB2)
+#For a given model, reconstructs the most probable states sequence, using the Viterbi algorithm.
+
+table(hmm_statesB2)/nrow(prep1min10cleanB)
+
+#from tuto mjones
+# model fit can be assessed using the pseudo-residuals (e.g., residual autocorrelation fucntion plot below)
+# compute pseudo-residuals for the steps and the angles
+pr <- pseudoRes(fitted_modelB2)
+# plot the ACF of step pseudo-residuals
+acf(pr$stepRes[!is.na(pr$stepRes)],lag.max = 100) 
+acf(pr$angleRes[is.finite(pr$angleRes)], lag.max = 100)
+
+#################### CHECK
+prep1min10cleanB2 <- prep1min10cleanB
+prep1min10cleanB2$state <- hmm_statesB2
+datastatesB2 <- prep1min10cleanB2
+datastatesB2$device <- sub("_.*", "", datastatesB2$ID) #extraictdevice_id
+datastatesB2$device_day <-  sub("^([^_]+_[^_]+).*", "\\1", datastatesB2$ID) #concatenate day and device_id
+
+resu1 <- datastatesB2 %>% group_by(state) %>% summarize(mean_step = mean(step), sd_step = sd(step), mean_angle = mean(angle), sd_angle = sd(angle))
+  
+# 1. 
+etat_par_jour2B <- datastatesB2 %>%
+  group_by(device_day, device, state) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(device_day, device) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+# 2. 
+etat_moyen_par_individu2 <- etat_par_jour2B %>%
+  group_by(device, state) %>%
+  summarise(mean_prop = mean(prop), .groups = "drop") %>%
+  arrange(device, state)
+
+ggplot(etat_moyen_par_individu2, aes(x = factor(device), y = mean_prop, fill = factor(state))) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    x = "Individual (device)",
+    y = "Mean daily proportion",
+    fill = "State"
+  ) +
+  theme_minimal()
+
+# 3. globally
+etat_moyen_global2 <- etat_moyen_par_individu2 %>%
+  group_by(state) %>%
+  summarise(mean_prop_all_individuals = mean(mean_prop), .groups = "drop")
+
+
+datastatesB2 <- datastatesB2 %>% mutate(pop = "B")
+datastatesall2 <- bind_rows(datastatesall2, datastatesB2)
+
+
+################## Maps
+
+#for some sequences: examples
+id_select <- "243695_2024-06-10_9"
+
+prep_id <- subset(datastatesB2, ID == id_select)
+
+# Conversion sf to UTM 31N then WGS84
+prep_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32631) %>%
+  st_transform(4326)
+
+# Labels (temporary)
+stateNames <- c("Stationnaire", "Transit", "Foraging")
+stateColors <- c("Stationnaire" = "#F1C40F",
+                 "Transit" = "#3498DB",
+                 "Foraging" = "#2ECC71")
+
+prep_sf$stateName <- factor(prep_sf$state,
+                            levels = 1:3,
+                            labels = stateNames)
+
+prep_line <- prep_sf %>%
+  arrange(time) %>%
+  summarise(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+tmap_mode("view")
+
+tm_shape(prep_line) +
+  tm_lines(col = "grey60", lwd = 1.2) +
+tm_shape(prep_sf) +
+  tm_symbols(
+    col = "stateName",
+    palette = stateColors,
+    size = 0.4,           
+    border.lwd = 0.3,
+    alpha = 0.9,
+    popup.vars = c("État" = "stateName")
+  ) +
+  tm_layout(
+    title = paste("Séquence", id_select),
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+
+```
+
+
+##### Additionnal representations
+
+```{r}
+stateColors <- c("Stationary" = "orange",
+                 "Transit_flight" = "blue",
+                 "ARS" = "darkgreen")
+
+stateNames <- c("Stationary", "Transit_flight", "ARS")
+
+# add labels
+datastatesB2$stateName <- factor(datastatesB2$state,
+                                       levels = 1:3,
+                                       labels = stateNames)
+
+# Conversion to sf with CRS UTM 31N (EPSG:32631)
+prep_sf <- st_as_sf(datastatesB2,
+                    coords = c("x", "y"),
+                    crs = 32631)   # UTM zone 31N (Europe, WGS84)
+
+# Transformation to WGS84 (lat/lon)
+prep_sf <- st_transform(prep_sf, crs = 4326)
+
+#add states
+prep_sf$state <- datastatesB2$state
+prep_sf$stateName <- factor(prep_sf$state,
+                            levels = 1:3,
+                            labels = stateNames)
+#map
+tmap_mode("view")  
+
+tm_shape(prep_sf) +
+  tm_symbols(col = "stateName",
+             palette = stateColors,
+             size = 0.2,
+             alpha = 0.7,
+             popup.vars = c("State" = "stateName"))
+
+prep_line <- prep_sf %>%
+  summarise(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+tm_shape(prep_line) +
+  tm_lines(col = "grey50") +
+tm_shape(prep_sf) +
+  tm_symbols(col = "stateName",
+             palette = stateColors,
+             size = 0.02,
+             alpha = 0.7)
+
+### With previous and following sequences
+
+id_select <- "243695_2024-06-07_9"
+
+id_root <- sub("_[0-9]+$", "", id_select)
+
+prep_id <- datastatesB2 %>%
+  dplyr::filter(grepl(id_root, ID))
+
+# Conversion sf to UTM 31N the, WGS84
+prep_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32631) %>%
+  st_transform(4326)
+
+# Name the states
+# stateNames <- c("Stationnaire", "Transit", "Foraging")
+stateColors <- c("1" = "#F1C40F",
+                 "3" = "#3498DB",
+                 "2" = "#2ECC71")
+
+# Add states
+prep_sf$stateName <- factor(prep_sf$state,
+                            levels = 1:3,
+                            labels = c("1", "2", "3"))
+
+# Line connecting points in chronological order
+prep_line <- prep_sf %>%
+  arrange(time) %>%
+  summarise(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+# Interactive mode
+tmap_mode("view")
+
+tm_shape(prep_line) +
+  tm_lines(col = "grey60", lwd = 1.2) +
+tm_shape(prep_sf) +
+  tm_symbols(
+    col = "stateName",
+    palette = stateColors,
+    size = 0.4,           
+    border.lwd = 0.3,
+    alpha = 0.9,
+    popup.vars = c("État" = "stateName")
+  ) +
+  tm_layout(
+    title = paste("Séquence", id_select),
+    legend.outside = TRUE,
+    frame = FALSE
+  )
+
+###
+
+id_select <- "243711_2024-06-12_7"
+id_root <- sub("_[0-9]+$", "", id_select)
+
+prep_id <- prep_sf %>%
+  arrange(time) %>%
+  mutate(
+    segment_id = cumsum(state != lag(state, default = first(state)))
+  )
+
+# Conversion sf
+prep_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32631) %>%
+  st_transform(4326)
+
+# add labels
+datastatesB2$stateName <- factor(datastatesB2$state,
+                                       levels = 1:3,
+                                       labels = stateNames)
+
+# États
+stateColors <- c("1" = "#F1C40F",
+                 "2" = "#2ECC71",
+                 "3" = "#3498DB")
+
+prep_sf$stateName <- factor(prep_sf$state,
+                            levels = 1:3,
+                            labels = c("1", "2", "3"))
+
+# Ligne globale (optionnel)
+prep_lines <- prep_id %>%
+  arrange(time) %>%
+  group_by(segment_id, stateName) %>%
+  summarise(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+# Visualisation
+tmap_mode("view")
+
+tm_shape(prep_lines) +
+  tm_lines(
+    col = "stateName",
+    palette = stateColors,
+    lwd = 1.2
+  ) +
+tm_shape(prep_id) +
+  tm_symbols(
+    fill = "stateName",
+    fill.scale = tm_scale(values = stateColors),
+    size = 0.4,
+    border.lwd = 0.3,
+    fill_alpha = 0.9
+  ) +
+tm_layout(
+  legend.outside = TRUE,
+  frame = FALSE
+)
+
+########
+# --- 1. Sélection individu-jour ---
+id_select <- "243708_2024-06-12"
+prep_id <- datastatesB2 %>%
+  filter(device_day == id_select) %>%
+  arrange(time)
+
+# --- 2. Créer les segments (points t → t+1) ---
+segments <- prep_id %>%
+  mutate(
+    x_end = lead(x),
+    y_end = lead(y),
+    state_end = lead(state),
+    time_end = lead(time)
+  ) %>%
+  filter(!is.na(x_end))  # enlever dernier point
+
+# --- 3. Transformer en lignes sf ---
+lines_sf <- segments %>%
+  rowwise() %>%
+  mutate(
+    geometry = st_sfc(
+      st_linestring(
+        matrix(c(x, y, x_end, y_end), ncol = 2, byrow = TRUE)
+      ),
+      crs = 32631
+    )
+  ) %>%
+  st_as_sf() %>%
+  st_transform(4326)
+
+# --- 4. Points sf ---
+points_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32631) %>%
+  st_transform(4326)
+
+# --- 5. Couleurs ---
+stateColors <- c("1" = "#F1C40F",
+                 "2" = "#2ECC71",
+                 "3" = "#3498DB")
+
+# --- 6. Visualisation ---
+tmap_mode("view")
+
+tm_shape(lines_sf) +
+  tm_lines(
+    col = "state_end",   # état du point d’arrivée
+    palette = stateColors,
+    lwd = 1.2
+  ) +
+tm_shape(points_sf) +
+  tm_symbols(
+    fill = "state",
+    fill.scale = tm_scale(values = stateColors),
+    size = 0.4,
+    border.lwd = 0.3,
+    fill_alpha = 0.9
+  ) +
+tm_layout(
+  title = id_select,
+  legend.outside = TRUE,
+  frame = FALSE
+)
+
+
+
+# --- 1. ---
+id_select <- "243713_2024-06-16"
+
+prep_id <- datastatesB2 %>%
+  filter(device_day == id_select) %>%
+  arrange(time)
+
+# --- 2. SEGMENTS (t → t+1) ---
+segments <- prep_id %>%
+  mutate(
+    x_end = lead(x),
+    y_end = lead(y),
+    state_end = lead(state),
+    time_end = lead(time)
+  ) %>%
+  filter(!is.na(x_end))
+
+# --- 3. LINES sf ---
+lines_sf <- segments %>%
+  rowwise() %>%
+  mutate(
+    geometry = st_sfc(
+      st_linestring(
+        matrix(c(x, y, x_end, y_end), ncol = 2, byrow = TRUE)
+      ),
+      crs = 32631
+    )
+  ) %>%
+  st_as_sf() %>%
+  st_transform(4326)
+
+# --- 4. POINTS sf ---
+points_sf <- st_as_sf(prep_id, coords = c("x", "y"), crs = 32631) %>%
+  st_transform(4326)
+
+# --- 5.For QGIS ---
+
+points_sf$state_f <- as.factor(points_sf$state)
+
+lines_sf$state_start <- as.factor(lines_sf$state)
+lines_sf$state_end   <- as.factor(lines_sf$state_end)
+
+lines_sf$segment_id <- 1:nrow(lines_sf)
+
+
+tmap_mode("view")
+
+tm_shape(lines_sf) +
+  tm_lines(
+    col = "state_end",   # état du point d’arrivée
+    palette = stateColors,
+    lwd = 1.2
+  ) +
+tm_shape(points_sf) +
+  tm_symbols(
+    fill = "state",
+    fill.scale = tm_scale(values = stateColors),
+    size = 0.4,
+    border.lwd = 0.3,
+    fill_alpha = 0.9
+  ) +
+tm_layout(
+  title = id_select,
+  legend.outside = TRUE,
+  frame = FALSE
+)
+
+```
+
