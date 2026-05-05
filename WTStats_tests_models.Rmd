@@ -1,0 +1,1146 @@
+---
+title: "WTStats_tests_models"
+author: "Oceane BEGASSAT"
+date: "2026-05-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Load packages
+```{r}
+library(tidyverse)
+library(gridExtra)
+library(MuMIn) #pour AIcc
+library(lme4) #pour glmer
+library(emmeans)
+library(performance)#R²
+```
+
+## 1 ) Stats AKDEc
+
+### Load + boxplots
+
+```{r}
+indiv_info2 <- readRDS( "dataMvmt_stage.rds")
+
+#pivot to have a column "stage" as explicative variable
+indiv_long_with <- indiv_info2 %>%
+  dplyr::select(name, pop, colonie, AKDE95inc, AKDE95rea, , sex, pop) %>%
+  pivot_longer(
+    cols = c(AKDE95inc, AKDE95rea),
+    names_to = "stage",
+    values_to = "AKDE95"
+  ) %>%
+  mutate(
+    stage = ifelse(stage == "AKDE95inc", "inc", "rea"),
+  )
+
+indiv_long_with$name <- as.factor(indiv_long_with$name)
+indiv_long_with$stage <- as.factor(indiv_long_with$stage)
+indiv_long_with$sex <- as.factor(indiv_long_with$sex)
+indiv_long_with$colonie <- as.factor(indiv_long_with$colonie)
+
+indiv_long <- indiv_long_with
+```
+
+### Effect of stage: Paired T test
+from https://en.datainvestigatorth.com/post/the-difference-between-paired-sample-t-test-and-wilcoxon-signed-rank-test-when-to-use-and-how-they
+
+
+Assumptions of the Paired Sample T-Test
+
+The two sets of data come from the same group (dependent samples). yes
+The differences between the paired values are normally distributed.
+The dependent variable is measured on an interval or ratio scale. yes
+
+The Wilcoxon Signed Rank Test is a non-parametric alternative to the Paired Sample T-Test.
+It is used when the data are not normally distributed or contain outliers, making the mean unreliable as a measure of central tendency.
+
+The choice depends mainly on the distribution and measurement level of your data.
+
+If your data are normally distributed and quantitative, use the Paired Sample T-Test.
+If your data are non-normal or contain outliers, use the Wilcoxon Signed Rank Test.
+If your dependent variable is ordinal (e.g., ranked or rating data), use the Wilcoxon Signed Rank Test.
+If your dependent variable is interval or ratio (e.g., scores, time, income), use the Paired Sample T-Test.
+
+```{r}
+
+#paired dataframe
+paired <- indiv_long %>%
+  dplyr::select(name, stage, AKDE95) %>%
+  filter(stage %in% c("inc", "rea")) %>%
+  tidyr::pivot_wider(
+    names_from = stage,
+    values_from = AKDE95,
+    names_prefix = "AKDE_"
+  ) %>%
+  filter(!is.na(AKDE_inc) & !is.na(AKDE_rea))
+#n = 10
+
+
+#################### Global t.test
+
+#is the difference between the two stages normally ditributed?
+diff_ <- paired$AKDE_rea-paired$AKDE_inc
+hist(diff_) #non normal
+par(mfrow = c(1,2))
+qqnorm(diff_); qqline(diff_) #no
+shapiro.test(diff_) #W = 0.64691, p-value = 0.0002015
+
+paired$AKDE_inclog <- log(paired$AKDE_inc)
+paired$AKDE_realog <- log(paired$AKDE_rea)
+diff_log <- paired$AKDE_realog-paired$AKDE_inclog
+qqnorm(diff_log); qqline(diff_log)#ok 
+hist(diff_log)
+shapiro.test(diff_log) #W = 0.97808, p-value = 0.9541
+#we ca use paired t test but only on log transformed data
+
+paired$AKDE_incsqrt <- sqrt(paired$AKDE_inc )
+paired$AKDE_reasqrt <- sqrt(paired$AKDE_rea)
+diff_sq <- paired$AKDE_reasqrt-paired$AKDE_incsqrt
+qqnorm(diff_sq); qqline(diff_sq)#ok mais pas très beau
+hist(diff_sq) #pas beau
+shapiro.test(diff_sq) #W = 0.84939, p-value = 0.05712 worst
+
+qqnorm(diff_); qqline(diff_)
+qqnorm(diff_log); qqline(diff_log) #better
+qqnorm(diff_sq); qqline(diff_sq)
+
+#On log scale
+t.test(
+  log(paired$AKDE_inc),
+  log(paired$AKDE_rea),
+  paired = TRUE
+)
+
+#or
+t.test(diff_log)
+
+
+############################ Separate by pop #######################################
+
+paired <- indiv_long %>%
+  dplyr::select(name, pop, stage, AKDE95) %>%
+  filter(stage %in% c("inc", "rea")) %>%
+  tidyr::pivot_wider(
+    names_from = stage,
+    values_from = AKDE95,
+    names_prefix = "AKDE_"
+  ) %>%
+  filter(!is.na(AKDE_inc) & !is.na(AKDE_rea))
+
+paired$AKDE_inclog <- log(paired$AKDE_inc )
+paired$AKDE_realog <- log(paired$AKDE_rea)
+
+gl <- paired %>% filter(pop == "GL")
+b <- paired %>% filter(pop == "B")
+
+#is the difference between the two stages normally ditributed?
+diff_ <- gl$AKDE_rea-gl$AKDE_inc
+hist(diff_) #non normal
+par(mfrow = c(1,2))
+qqnorm(diff_); qqline(diff_) #no
+shapiro.test(diff_)#W = 0.9222, p-value = 0.5493
+
+diff_ <- b$AKDE_rea-b$AKDE_inc
+hist(diff_) #non normal
+par(mfrow = c(1,2))
+qqnorm(diff_); qqline(diff_) #no
+shapiro.test(diff_)#W = 0.79642, p-value = 0.05455
+
+diff_log <- gl$AKDE_realog-gl$AKDE_inclog
+qqnorm(diff_log); qqline(diff_log)#ok 
+hist(diff_log)
+shapiro.test(diff_log)#W = 0.98898, p-value = 0.9522
+
+diff_log <- b$AKDE_realog-b$AKDE_inclog
+qqnorm(diff_log); qqline(diff_log)#ok 
+hist(diff_log)
+shapiro.test(diff_log) #W = 0.95307, p-value = 0.7651
+
+t.test(
+  log(gl$AKDE_inc),
+  log(gl$AKDE_rea),
+  paired = TRUE
+)
+#t = -1.6194, df = 3, p-value = 0.2038
+
+t.test(
+  log(b$AKDE_inc),
+  log(b$AKDE_rea),
+  paired = TRUE
+)
+#t = -1.4772, df = 5, p-value = 0.1997
+
+
+#plot
+paired %>% 
+  pivot_longer(cols = c(AKDE_inc, AKDE_rea),
+               names_to = "stage",
+               values_to = "AKDE") %>%
+  ggplot(aes(x = stage, y = AKDE, group = name, color = pop)) +
+  geom_line(alpha = 0.5) +
+  geom_point(size = 3) +
+  facet_wrap(~ pop) +
+  scale_x_discrete(labels = c("AKDE_inc" = "Incubation", "AKDE_rea" = "Rearing")) +
+  theme_classic() +
+  theme(legend.position = "none") +
+  labs(x = "Stage", y = "AKDE95", 
+       title = "Within-individual change in AKDE between stages\nFaceted by population")
+
+```
+
+### Effect of the sex : Wilcoxon tests
+
+```{r}
+
+### ALL data pooled
+## Can we use a t-test?
+indivf <- indiv_long %>% filter(sex == "f")
+indivm <- indiv_long %>% filter(sex == "m")
+hist(indivf$AKDE95)
+hist(indivm$AKDE95)
+#not normal at all
+# + non independant data : two lines per indivduals (incubation + chick rearing)
+
+#divide into two stages
+indivinc <- indiv_long %>% filter(stage == "inc")
+indivrea <- indiv_long %>% filter(stage == "rea")
+indivrea <- indivrea[!is.na(indivrea$AKDE95), ]
+hist(indivinc$AKDE95)
+hist(indivrea$AKDE95)
+#not normal (right skewed)
+
+#log-transformation ?
+hist(log(indivinc$AKDE95)) #perhaps
+hist(log(indivrea$AKDE95))
+#Not normal  : non parametric test
+
+
+#The Wilcoxon test is a non-parametric statistical test used to determine if there are significant differences between two related groups
+# By default, the wilcox.test function in R omits pairs with missing values.
+
+#Per stage
+table(indivinc$sex, indivinc$name)
+#M = 9, F = 6
+table(indivrea$sex, indivrea$name)
+#M = 5, F = 5
+
+wilcox.test(AKDE95 ~ sex, data = indivinc) #W = 30, p-value = 0.7756 -> W = 28, p-value = 0.9546
+wilcox.test(AKDE95 ~ sex, data = indivrea)#W = 8, p-value = 0.4206 -> W = 3, p-value = 0.05556
+
+```
+
+### Effect of the study area : Wilcoxon tests
+
+```{r}
+indivgl <- indiv_long %>% filter(pop == "GL")
+indivb <- indiv_long %>% filter(pop == "B")
+par(mfrow = c(2, 2))  
+hist(indivb$AKDE95)
+hist(indivgl$AKDE95)
+hist(log(indivb$AKDE95)) #normal
+hist(log(indivgl$AKDE95))
+#not normal
+#dependance structure
+
+#Effect of pop
+#test by stage
+wilcox.test(AKDE95 ~ pop, data = indivinc)#W = 37, p-value = 0.2721 -> W = 39, p-value = 0.181
+wilcox.test(AKDE95 ~ pop, data = indivrea)#W = 20, p-value = 0.1143 -> W = 16, p-value = 0.4762
+
+#Boxplot
+ggplot(indiv_long, aes(x = stage, y = AKDE95, color = sex)) +
+  geom_boxplot(alpha = 0.3) +
+  geom_jitter(width = 0.1, size = 1) +
+  facet_wrap(~ pop) +
+  theme_classic() +
+  labs(
+    x = "Stage",
+    y = "AKDE95",
+    title = "Home-range size"
+  ) +
+  theme(legend.position = "none")
+
+###log transformed fo readibility
+
+indiv_long$AKDE95log <- log(indiv_long$AKDE95)
+
+ggplot(indiv_long, aes(x = stage, y = AKDE95log, fill = sex)) +
+  geom_boxplot(
+    outlier.shape = NA, show.legend = FALSE
+  ) +
+  geom_point(
+    aes(colour = sex),
+    position = position_jitterdodge(jitter.width = 0.20),
+    show.legend = TRUE,
+    size = 1,
+    alpha = 0.7
+  ) +
+  facet_wrap(~ pop) +
+  scale_fill_manual(values = c("white", "grey60")) +
+  scale_colour_manual(values = c("white", "grey60")) +
+  theme_classic()
+
+ggplot(indiv_long, aes(x = stage, y = AKDE95log, colour = sex)) +
+  geom_jitter(
+    width = 0.1,
+    size = 2,
+    alpha = 0.9
+  ) +
+  facet_wrap(~ pop) +
+  scale_colour_manual(values = c("grey50", "black")) +
+  theme_classic()
+
+#coloured (colorblind-proof)
+
+g1 <- ggplot(indiv_long, aes(x = stage, y = AKDE95log, fill = sex)) +
+  geom_boxplot(
+    outlier.shape = NA, show.legend = TRUE
+  ) +
+  geom_point(
+    aes(colour = sex),
+    position = position_jitterdodge(jitter.width = 0.0),
+    show.legend = F,
+    size = 1,
+    alpha = 0.7
+  ) +
+  facet_wrap(~ pop) +
+  scale_fill_manual(values = c("#88ccee", "sienna2")) +
+  scale_colour_manual(values = c("black", "black")) +
+  theme_classic()
+
+```
+
+## 2 ) Stats daily distances
+
+### Load
+```{r}
+stats_dist_day <- readRDS("D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Thesis_guifette/GIT/PhD_whiskered_tern/Scripts_R/Reproduction/data_Mvmt_day.rds")
+#daily basis, n = 281
+
+table(stats_dist_day$device_id, stats_dist_day$colonie)
+stats_dist_day$colonie <- as.factor(stats_dist_day$colonie)
+
+table(stats_dist_day$sex) 
+table(stats_dist_day$pop)
+table(stats_dist_day$stage) 
+table(stats_dist_day$device_id) #3-39 days per individual
+summary(stats_dist_day$n) #21-998 locs per day
+```
+
+### Y
+
+Mean daily distance to the nest (only locs >12m from the nest)
+
+```{r}
+#Y distribution
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(stats_dist_day$mean_dist,col='blue',ylab='Daily mean distance from the nest')
+# Cleveland plot
+dotchart(stats_dist_day$mean_dist,pch=16,col='blue',xlab='Daily mean distance from the nest')
+# Histogram
+hist(stats_dist_day$mean_dist,col='blue',xlab="Daily mean distance from the nest",main="")
+# Quantile-Quantile plot
+qqnorm(stats_dist_day$mean_dist,pch=16,col='blue',xlab='')
+qqline(stats_dist_day$mean_dist,col='red')
+# Non normal
+shapiro.test(stats_dist_day$mean_dist) #W = 0.76532, p-value = < 0.0001
+#No outlier
+
+```
+
+
+### Xs
+
+```{r}
+par(mfrow=c(1,4))
+
+# Sex
+boxplot(mean_dist ~ sex,
+        data = stats_dist_day,
+        main = "Daily % of nesting bhv")
+# pop
+boxplot(
+  mean_dist ~ pop,
+  data = stats_dist_day,
+  col = c('blue3', 'red2'),
+  main = "Daily % of nesting bhv"
+)
+
+stage
+boxplot(
+  mean_dist ~ stage,
+  data = stats_dist_day,
+  col = c('blue3', 'red2'),
+  main = "Daily % of nesting bhv"
+)
+summary(stats_dist_day$mean_dist)
+
+```
+
+### Choice of the random factors -> not transformed data
+
+```{r}
+
+#interactions ok ?
+
+table(stats_dist_day$sex,stats_dist_day$stage )
+
+table(stats_dist_day$sex,stats_dist_day$pop)
+
+table(stats_dist_day$stage,stats_dist_day$pop)
+
+#candidates : device, device and pop, pop, (colony )
+
+#LM, constant model
+mod0glm <- lm(mean_dist ~1,  data = stats_dist_day) #644.5083
+#LMM constant avec random = indiv
+mod0glmm <- lmer(mean_dist ~(1|device_id), data = stats_dist_day)
+#LMM constant avec random = pop
+mod0glmm1 <- lmer(mean_dist ~(1|pop),data = stats_dist_day) 
+#LMM constant avec random = colonie
+mod0glmm2 <- lmer(mean_dist ~(1|colonie), data = stats_dist_day) 
+mod0glmm3 <- lmer(mean_dist ~(1|colonie) + (1|pop), data = stats_dist_day) 
+#pop and colony do not carry variance
+
+
+#LM complet
+modglm <- lm(mean_dist ~ sex*stage ,  data = stats_dist_day)
+
+#LMM complet avec random = indiv
+modglmm <- lmer(mean_dist ~ sex*stage  + (1|device_id), data = stats_dist_day)
+
+#LMM complet avec random = pop
+modglmm1 <- lmer(mean_dist ~ sex*stage  + (1|pop), data = stats_dist_day) 
+
+#LMM complet avec random = colony
+modglmm3 <- lmer(mean_dist ~ sex*stage  + (1|colonie), data = stats_dist_day) 
+
+#LMM complet avec random = pop+ device
+modglmm2 <- lmer(mean_dist ~ sex*stage + (1|pop) +(1|device_id), data = stats_dist_day) 
+
+#LMM complet avec random = device nested in pop
+modglmm4 <- lmer(mean_dist ~ sex*stage + (1 | pop/device_id), data = stats_dist_day) 
+
+#LMM complet avec random = device nested in colony
+modglmm5 <- lmer(mean_dist ~ sex*stage + (1 | colonie/device_id), data = stats_dist_day) 
+
+#Compare AICc
+model_list <- list(
+  mod0glm,
+  mod0glmm,
+  mod0glmm1,
+  mod0glmm2,
+  mod0glmm3
+)
+aiccs <- sapply(model_list, AICc)
+aiccs#644.5083 556.8360 606.3602 563.1826 564.6317
+
+model_list <- list(
+  modglm,
+  modglmm,
+  modglmm1,
+  modglmm3,
+  modglmm2,
+  modglmm4,
+  modglmm5
+)
+aiccs <- sapply(model_list, AICc)
+aiccs #640.9179 556.6524 613.6301 *551.9899* 557.4026 *550.3489*
+
+best_model <- model_list[[ which.min(aiccs)]]
+best_model #mean_dist ~ sex * stage + (1 | colonie/device_id)
+#delta AICc <2 with only colonie more parsimonious
+#But we will test with the nested structure (more accurate given the sampling method)
+
+```
+
+
+###  Model selection -> not transformed data
+```{r}
+#Selection with Dredge
+fullmod <- lmer(
+  mean_dist~ sex*stage + sex*pop + stage*pop + (1|colonie), data = stats_dist_day, na.action = na.fail, REML = F)
+Dredge <- dredge(fullmod)
+#all fixed factors retained, interaction pop*sex, sex*stage (unbalanced sample size)
+
+modglm <- lmer(mean_dist~  sex*stage +
+                  (1 | colonie), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm)
+r.squaredGLMM(modglm)
+confint(modglm, oldNames=FALSE)
+
+#Standardized residuals vs predicted values: if random distribution = ok
+plot(modglm, which = 1) #Heteroscedasticity ! Need a transformation
+modglm1 <- lmer(mean_dist~  pop + sex + stage +  sex:stage + pop:sex +
+                (1 | colonie), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm1)#541.9591
+r.squaredGLMM(modglm)
+plot(modglm1, which = 1) #Heteroskedasticity !
+```
+
+### Log transformation, model selection and validation
+
+```{r}
+stats_dist_day$logmeandist <- log(stats_dist_day$mean_dist)
+
+#LM, constant model
+mod0glm <- lm(logmeandist ~1,  data = stats_dist_day)
+#LMM constant avec random = indiv
+mod0glmm <- lmer(logmeandist ~(1|device_id), data = stats_dist_day)
+#LMM constant avec random = pop
+mod0glmm1 <- lmer(logmeandist ~(1|pop),data = stats_dist_day)
+#LMM constant avec random = colonie
+mod0glmm2 <- lmer(logmeandist ~(1|colonie), data = stats_dist_day)
+
+mod0glmm3 <- lmer(logmeandist ~(1|colonie) + (1|device_id), data = stats_dist_day)
+mod0glmm4 <- lmer(logmeandist ~(1|colonie) +(1|pop), data = stats_dist_day)
+mod0glmm5 <- lmer(logmeandist ~(1|device_id) +(1|pop), data = stats_dist_day)
+mod0glmm6 <- lmer(logmeandist ~(1|device_id) +(1|colonie), data = stats_dist_day)
+mod0glmm7 <- lmer(logmeandist ~(1 | pop/device_id), data = stats_dist_day)
+mod0glmm8 <- lmer(logmeandist ~(1 | colonie/device_id), data = stats_dist_day)
+
+
+#LM complet
+modglm <- lm(logmeandist ~ sex*stage + sex*pop + stage*pop ,  data = stats_dist_day)
+
+#LMM complet avec random = indiv
+modglmm <- lmer(logmeandist ~ sex*stage + sex*pop + stage*pop + (1|device_id), data = stats_dist_day)
+
+#LMM complet avec random = pop
+modglmm1 <- lmer(logmeandist ~ sex*stage + sex*pop + stage*pop + (1|pop), data = stats_dist_day)
+
+#LMM complet avec random = colony
+modglmm2 <- lmer(logmeandist ~ sex*stage + sex*pop + stage*pop + (1|colonie), data = stats_dist_day)
+
+#LMM complet avec random = colony + device
+modglmm3 <- lmer(logmeandist ~ sex*stage +sex*pop + stage*pop+ (1|pop) +(1|device_id), data = stats_dist_day)
+
+#LMM complet avec random = device nested in colony
+modglmm4 <- lmer(logmeandist ~ sex*stage + sex*pop + stage*pop+ (1 | pop/device_id), data = stats_dist_day)
+
+modglmm5 <- lmer(logmeandist ~ sex*stage + sex*pop + stage*pop + (1|colonie) +(1|device_id), data = stats_dist_day)
+
+modglmm6 <- lmer(logmeandist ~ sex*stage + sex*pop + stage*pop + (1 | colonie/device_id), data = stats_dist_day)
+
+#Compare AICc
+model_list <- list(mod0glm,
+mod0glmm,
+mod0glmm1,
+mod0glmm2,
+mod0glmm3,
+mod0glmm4,
+mod0glmm5,
+mod0glmm6,
+mod0glmm7 ,
+mod0glmm8)
+aiccs <- sapply(model_list, AICc)
+aiccs #545.7701 404.9336 498.0159 444.5213 403.9124 445.7032 405.8515 403.9124 405.8515 403.9124
+
+model_list <- list(
+modglm,
+modglmm,
+modglmm1,
+modglmm2,
+modglmm3,
+modglmm4,
+modglmm5,
+modglmm6)
+aiccs <- sapply(model_list, AICc)
+aiccs #491.0367 410.3688 514.6084 430.9587 412.5194 412.5194 407.2003 407.2003
+best_model <- model_list[[ which.min(aiccs)]]
+best_model #logmeandist ~ (1 | colonie) + (1 | device_id) 
+#Equal with (1 | colonie/device_id) (more accurate for our sampling method)
+
+##################
+
+#Selection with Dredge
+fullmod <- lmer(
+  logmeandist~ sex*stage + sex*pop + stage*pop + (1 | colonie/device_id), data = stats_dist_day, na.action = na.fail, REML = F)
+Dredge <- dredge(fullmod)
+mods <- get.models(Dredge, subset = 1:10)
+
+
+# data.frame
+r2_df <- data.frame(
+  Model = names(mods),
+  do.call(
+    rbind,
+    lapply(mods, function(m) {
+      as.data.frame(r2(m))
+    })
+  ),
+  row.names = NULL
+)
+
+r2_df
+
+#3 competitive models 
+modglm1 <- lmer(logmeandist~  pop + sex + stage + sex:stage +  (1 | colonie/device_id), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm1) #392.2631
+r.squaredGLMM(modglm1)
+confint(modglm1)
+
+#remove pop
+modglm2 <- lmer(logmeandist~  sex + stage + sex:stage +  (1 | colonie/device_id), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm2) #392.444
+r.squaredGLMM(modglm2)
+confint(modglm2)
+
+#add an interaction
+modglm3 <- lmer(logmeandist~  pop + sex + stage + sex:stage + pop:sex +  (1 | colonie/device_id), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm3)#393.3435
+r.squaredGLMM(modglm3)
+confint(modglm3)
+
+#adding the interaction do not improve the model a lot (NS)
+
+# Top modèle : 2nd modèle
+modglm <- lmer(logmeandist~ sex + stage + sex:stage +  (1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+AICc(modglm)
+r.squaredGLMM(modglm)
+confint(modglm, oldNames=FALSE) 
+
+#Standardized residuals vs predicted values: if random distribution = ok
+plot(modglm, which = 1) #ok!
+
+####### try with nested structure : qualitatively similar?
+modglm <- lmer(logmeandist~  sex + stage + sex:stage + (1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+AICc(modglm)
+rsq(modglm)
+r.squaredGLMM(modglm) #exactly the same
+confint(modglm, oldNames=FALSE) #identical
+modeglm <-  lmer(logmeandist~  sex + stage + sex:stage + (1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+```
+
+### Assumption checking
+
+Residuals analysis
+
+```{r}
+mod1 <- modglm 
+resid<-residuals(mod1, type="pearson")
+
+par(mfrow=c(3,2))
+# Histogram
+hist(resid,col='blue',xlab="residuals",main="")
+# Quantile-Quantile plot
+qqnorm(resid,pch=16,col='blue',xlab='')
+qqline(resid,col='red')
+
+# residuals vs fitted
+plot(resid~fitted(mod1)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok!
+
+# residuals against Sex
+boxplot(resid~ stats_dist_day$sex,
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Sex",
+         main = "")
+abline(h = 0)
+#ok !
+
+
+boxplot(resid~ stats_dist_day$stage, 
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Stage",
+         main = "")
+abline(h = 0)
+#ok
+
+```
+
+### Graphs and post-hoc
+
+Post-hoc : see also help from https://aosmith.rbind.io/2019/03/25/getting-started-with-emmeans/
+and https://cran.r-project.org/web/packages/emmeans/vignettes/AQuickStart.html
+
+```{r}
+
+g2 <- ggplot(stats_dist_day, aes(x = stage, y = logmeandist, fill = sex)) +
+  geom_boxplot(
+    outlier.shape = NA, show.legend = FALSE
+  ) +
+  geom_point(
+    aes(colour = sex),
+    position = position_jitterdodge(jitter.width = 0.20),
+    show.legend = F,
+    size = 0.5,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = c("#88ccee", "sienna2")) +
+  scale_colour_manual(values = c("black", "black")) +
+  theme_classic()
+
+
+gx <- ggplot(stats_dist_day, aes(x = sex, y = logmeandist, fill = stage)) +
+  geom_boxplot(
+    outlier.shape = NA
+  ) +
+  geom_point(
+    aes(colour = stage),
+    position = position_jitterdodge(jitter.width = 0.20),
+    show.legend = TRUE,
+    size = 0.6,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = c("#88ccee", "sienna2")) +
+  scale_colour_manual(values = c("black", "black")) +
+  theme_classic()
+
+emm <- emmeans(mod1, ~ sex * stage)
+emm_df <- as.data.frame(emm)
+ggplot(stats_dist_day, aes(x = interaction(stage, sex),
+                          y = logmeandist)) +
+  geom_boxplot(outlier.shape = NA, fill = "grey80") +
+  geom_point(position = position_jitter(width = 0.1),
+             size = 0.5, alpha = 0.5) +
+  geom_point(data = emm_df,
+             aes(x = interaction(stage, sex), y = emmean),
+             colour = "red", size = 3) +
+  theme_classic()
+
+#Post-hoc: interaction
+
+# Compute estimated marginal means (EMMs) for specified factors or factor combinations in a linear model; and optionally, comparisons or contrasts among them. EMMs are also known as least-squares means.
+
+#see help here : https://bookdown.org/dereksonderegger/571/4-contrasts.html
+#voir aussi https://www.statforbiology.com/2023/stat_emmeans_backtransform/#:~:text=It%20is%20very%20simple%3A%20emmeans%20auto-detects%20the%20transformation,that%20I%20will%20discuss%20in%20a%20future%20post%29.
+
+mod1 <- lmer(logmeandist~ sex + stage + sex:stage +  (1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+emm <- emmeans(mod1, ~ sex * stage, type="response")
+emm
+
+modglm <- lmer(log(mean_dist)~ sex + stage + sex:stage +  (1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+emm <- emmeans(modglm, ~ sex * stage, type="response")
+# préférable
+
+contrast(emm, method = "pairwise", by = "stage", type = "response")
+contrast(emm, method = "pairwise", by = "sex", type = "response")
+contrast(emm, method = "revpairwise", by = "sex", type = "response")
+ 
+dt <- as.data.frame(emm)
+dt$emmean_km <- exp(dt$emmean)
+dt$low <- exp(dt$lower.CL)
+dt$upp <- exp(dt$upper.CL)
+
+######
+
+par(mfrow =c(1,2))
+emmip(modglm, stage ~ sex, CIs = T)
+emmip(modglm, sex ~ stage, CIs = T)
+
+# 
+pairs(emm)
+contrast(emm, method = "revpairwise", by = "sex") #intra sex compare stage (rear vs incub et non  l'inverse)
+contrast(emm, method = "revpairwise", by = "pop")
+
+##### Quantify the difference
+
+#Is there a differece between sexes intra-stage ?
+
+modglm <- lmer(log(mean_dist)~ sex + stage + sex:stage +  (1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+emmeans(modglm, ~ sex | stage, type = "response") %>% pairs()
+
+#is there a difference between stages intra-sex ?
+modglm <- lmer(log(mean_dist)~ sex + stage + sex:stage +  (1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+emmeans(modglm, ~ stage | sex, type = "response") %>% pairs()
+
+```
+
+##3 ) Daily movement intensity
+Daily cumulatve distances / delta t (km/h)
+
+### Load 
+
+```{r}
+stats_dist_day <- readRDS ("D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Thesis_guifette/GIT/PhD_whiskered_tern/Scripts_R/Reproduction/data_Mvmt_day.rds")
+
+table(stats_dist_day$sex) 
+table(stats_dist_day$pop) 
+table(stats_dist_day$stage) 
+table(stats_dist_day$device_id) #3-39 days per individual
+summary(stats_dist_day$n) #21-998
+
+par(mfrow=c(1,3))
+
+# Sex
+boxplot(vitesse_kmh ~ sex,
+        data = stats_dist_day,
+        main = "")
+# pop
+boxplot(
+ vitesse_kmh ~ pop,
+  data = stats_dist_day,
+  col = c('blue3', 'red2'),
+  main = ""
+)
+#no difference
+
+#stage
+boxplot(
+  vitesse_kmh ~ stage,
+  data = stats_dist_day,
+  col = c('blue3', 'red2'),
+  main = ""
+)
+summary(stats_dist_day$vitesse_kmh)
+```
+
+### Y
+
+```{r}
+#Y distribution
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(stats_dist_day$vitesse_kmh,col='blue',ylab='Daily mean speed')
+# Cleveland plot
+dotchart(stats_dist_day$vitesse_kmh,pch=16,col='blue',xlab='Daily mean speed')
+# Histogram
+hist(stats_dist_day$vitesse_kmh,col='blue',xlab="Daily mean speed",main="")
+# Quantile-Quantile plot
+qqnorm(stats_dist_day$vitesse_kmh,pch=16,col='blue',xlab='')
+qqline(stats_dist_day$vitesse_kmh,col='red')
+# Non normal
+shapiro.test(stats_dist_day$vitesse_kmh) #W = 0.92282, p-value = 6.999e-11
+#No outlier
+
+```
+
+NOT shown : model with untransformed data -> heteroskedasticity
+
+### Square root transformation
+
+```{r}
+
+stats_dist_day$sqvitesse_kmh <- sqrt(stats_dist_day$vitesse_kmh)
+
+#Y distribution
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(stats_dist_day$sqvitesse_kmh,col='blue',ylab='Daily mean speed')
+# Cleveland plot
+dotchart(stats_dist_day$sqvitesse_kmh,pch=16,col='blue',xlab='Daily mean speed')
+# Histogram
+hist(stats_dist_day$sqvitesse_kmh,col='blue',xlab="Daily mean speed",main="")
+# Quantile-Quantile plot
+qqnorm(stats_dist_day$sqvitesse_kmh,pch=16,col='blue',xlab='')
+qqline(stats_dist_day$sqvitesse_kmh,col='red')
+# Non normal
+shapiro.test(stats_dist_day$sqvitesse_kmh) 
+#No outlier
+
+```
+
+### Xs
+```{r}
+# Sex
+boxplot(sqvitesse_kmh ~ sex,
+        data = stats_dist_day,
+        main = "")
+# pop
+boxplot(
+ sqvitesse_kmh ~ pop,
+  data = stats_dist_day,
+  col = c('blue3', 'red2'),
+  main = ""
+)
+#no difference
+
+#stage
+boxplot(
+  sqvitesse_kmh ~ stage,
+  data = stats_dist_day,
+  col = c('blue3', 'red2'),
+  main = ""
+)
+```
+
+### Model selection
+
+```{r}
+
+
+#LM, constant model
+mod0glm <- lm(sqvitesse_kmh ~1,  data = stats_dist_day)
+#LMM constant avec random = indiv
+mod0glmm <- lmer(sqvitesse_kmh ~(1|device_id), data = stats_dist_day)
+#LMM constant avec random = pop
+mod0glmm1 <- lmer(sqvitesse_kmh ~(1|pop),data = stats_dist_day)
+#LMM constant avec random = colonie
+mod0glmm2 <- lmer(sqvitesse_kmh ~(1|colonie), data = stats_dist_day)
+
+mod0glmm3 <- lmer(sqvitesse_kmh ~(1|colonie) + (1|device_id), data = stats_dist_day)
+mod0glmm4 <- lmer(sqvitesse_kmh ~(1|colonie) +(1|pop), data = stats_dist_day)
+mod0glmm5 <- lmer(sqvitesse_kmh ~(1|device_id) +(1|pop), data = stats_dist_day)
+mod0glmm6 <- lmer(sqvitesse_kmh ~(1|device_id) +(1|colonie), data = stats_dist_day)
+mod0glmm7 <- lmer(sqvitesse_kmh ~(1 | pop/device_id), data = stats_dist_day)
+mod0glmm8 <- lmer(sqvitesse_kmh ~(1 | colonie/device_id), data = stats_dist_day)
+
+
+#LM complet
+modglm <- lm(sqvitesse_kmh ~ sex*stage + sex*pop + stage*pop ,  data = stats_dist_day)
+
+#LMM complet avec random = indiv
+modglmm <- lmer(sqvitesse_kmh ~ sex*stage + sex*pop + stage*pop + (1|device_id), data = stats_dist_day)
+
+#LMM complet avec random = pop
+# modglmm1 <- lmer(sqvitesse_kmh ~ sex*stage + sex*pop + stage*pop + (1|pop), data = stats_dist_day)
+
+#LMM complet avec random = colony
+modglmm2 <- lmer(sqvitesse_kmh ~ sex*stage + sex*pop + stage*pop + (1|colonie), data = stats_dist_day)
+
+#LMM complet avec random = colony + device
+# modglmm3 <- lmer(sqvitesse_kmh ~ sex*stage +sex*pop + stage*pop+ (1|pop) +(1|device_id), data = stats_dist_day)
+
+#LMM complet avec random = device nested in colony
+# modglmm4 <- lmer(sqvitesse_kmh ~ sex*stage + sex*pop + stage*pop+ (1 | pop/device_id), data = stats_dist_day)
+
+modglmm5 <- lmer(sqvitesse_kmh ~ sex*stage + sex*pop + stage*pop + (1|colonie) +(1|device_id), data = stats_dist_day)
+
+modglmm6 <- lmer(sqvitesse_kmh ~ sex*stage + sex*pop + stage*pop + (1 | colonie/device_id), data = stats_dist_day)
+
+#Compare AICc
+model_list <- list(
+mod0glm,
+mod0glmm,
+mod0glmm1,
+mod0glmm2,
+mod0glmm3,
+mod0glmm4,
+mod0glmm5,
+mod0glmm6,
+mod0glmm7 ,
+mod0glmm8)
+aiccs <- sapply(model_list, AICc)
+aiccs #348.5433 276.1129 355.9065 289.1370 274.6231 291.1953 277.8522 274.6231 277.8522 274.6231
+  
+  
+model_list <- list(
+modglm,
+modglmm,
+# modglmm1,
+modglmm2,
+# modglmm3,
+# modglmm4,
+modglmm5,
+modglmm6)
+aiccs <- sapply(model_list, AICc)
+aiccs #296.4691 215.4444 235.8044 213.9351 213.9351
+best_model <- model_list[[ which.min(aiccs)]]
+best_model #sqvitesse_kmh ~ sex * stage + sex * pop + stage * pop + (1 |      colonie) + (1 | device_id)
+#Equal with (1 | colonie/device_id) (more accurate for our sampling method)
+
+##################
+
+#Selection with Dredge
+fullmod <- lmer(
+  sqvitesse_kmh~ sex*stage + sex*pop + stage*pop + (1 | colonie/device_id), data = stats_dist_day, na.action = na.fail, REML = F)
+Dredge <- dredge(fullmod)
+
+modglm2 <- lmer(sqvitesse_kmh~  pop + stage + pop:stage +
+                  (1 | colonie/device_id), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm2)#194.2543
+r.squaredGLMM(modglm2)
+confint(modglm2)
+
+modglm2 <- lmer(sqvitesse_kmh~  pop + stage +sex +  pop:stage +
+                  (1 | colonie/device_id), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm2)#195.0669
+r.squaredGLMM(modglm2)
+confint(modglm2)
+
+modglm2 <- lmer(sqvitesse_kmh~  pop + stage+ sex + pop:stage + sex:stage +
+                  (1 | colonie/device_id), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm2)#195.6341
+r.squaredGLMM(modglm2)
+confint(modglm2)
+
+modglm2 <- lmer(sqvitesse_kmh~  pop + stage+ sex + pop:sex + pop:stage +
+                  (1 | colonie/device_id), data = stats_dist_day, REML = F, na.action = na.fail)
+AICc(modglm2)#196.3918
+r.squaredGLMM(modglm2)
+confint(modglm2)
+
+mods <- get.models(Dredge, subset = 1:10)
+
+library(performance)
+
+# data.frame
+r2_df <- data.frame(
+  Model = names(mods),
+  do.call(
+    rbind,
+    lapply(mods, function(m) {
+      as.data.frame(r2(m))
+    })
+  ),
+  row.names = NULL
+)
+
+r2_df
+
+
+# Top model : stage:pop and stage
+modglm <- lmer(sqvitesse_kmh~  stage + pop + stage:pop +
+                  (1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+AICc(modglm)#205.8624
+r.squaredGLMM(modglm)
+confint(modglm) 
+
+#Standardized residuals vs predicted values: if random distribution = ok
+plot(modglm, which = 1) #ok!
+summary(modglm)
+```
+
+### Model validation: assumption checking
+
+Residuals analysis
+
+```{r}
+mod1 <- modglm
+resid<-residuals(mod1, type="pearson")
+
+par(mfrow=c(3,2))
+# Histogram
+hist(resid,col='blue',xlab="residuals",main="")
+# Quantile-Quantile plot
+qqnorm(resid,pch=16,col='blue',xlab='')
+qqline(resid,col='red')
+
+# residuals vs fitted
+plot(resid~fitted(mod1)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+#ok!
+
+
+boxplot(resid~ stats_dist_day$stage, 
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Stage",
+         main = "")
+abline(h = 0)
+#ok
+
+
+boxplot(resid~ stats_dist_day$pop, 
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "pop",
+         main = "")
+abline(h = 0)
+#ok
+
+```
+
+
+### Post-hoc
+```{r}
+
+# Compute estimated marginal means (EMMs) for specified factors or factor combinations in a linear model; and optionally, comparisons or contrasts among them. EMMs are also known as least-squares means.
+
+#see help here : https://bookdown.org/dereksonderegger/571/4-contrasts.html
+# variation en % :² -> pas interprétable directement
+#attention (mean(√y))^2 ≠ mean(y)
+
+modglm <- lmer(sqrt(vitesse_kmh) ~  stage + pop + stage:pop +(1 | colonie/device_id), data = stats_dist_day, REML = T, na.action = na.fail)
+emm <- emmeans(modglm, ~ stage*pop, type="response")
+emm
+
+emm2 = emmeans(modglm, specs = pairwise ~ pop|stage, type = "response")
+emm2
+
+contrast(emm, method = "revpairwise", by = "pop", type = "response")
+
+emm_bt <- regrid(emm)   # maintenant contrasts sont en km/h
+contrast(emm_bt, method="revpairwise", by="pop", type="response")
+contrast(emm_bt, method="revpairwise", by="stage", type="response")
+
+pairs(emm_bt)
+
+# Compare stages within pop
+emm <- emmeans(modglm, ~ stage| pop, type="response")
+emm_bt <- regrid(emm)   
+pairs(emm_bt)
+
+emm <- emmeans(modglm, ~  pop|stage, type="response")
+emm_bt <- regrid(emm)   
+pairs(emm_bt)
+
+emm_stage <- emmeans(
+  modglm,         
+  ~ stage,
+  type = "response"
+)
+emm_stage
+
+emm_stage_kmh <- summary(emm_stage)
+emm_stage_kmh$estimate_kmh <- emm_stage_kmh$emmean^2
+emm_stage_kmh$low_kmh <- emm_stage_kmh$lower.CL^2
+emm_stage_kmh$upp_kmh <- emm_stage_kmh$upper.CL^2
+emm_stage_kmh
+
+diff_kmh <- emm_stage_kmh$estimate_kmh[emm_stage_kmh$stage == "rear"] -
+            emm_stage_kmh$estimate_kmh[emm_stage_kmh$stage == "incub"]
+diff_kmh 
+
+perc_change <- (emm_stage_kmh$estimate_kmh[emm_stage_kmh$stage == "rear"] /
+                emm_stage_kmh$estimate_kmh[emm_stage_kmh$stage == "incub"] - 1) * 100
+perc_change 
+
+
+
+```
+
+
+
+### Représentation
+```{r}
+
+g3 <- ggplot(stats_dist_day, aes(x = stage, y = vitesse_kmh, fill = pop)) +
+  geom_boxplot(
+    outlier.shape = NA, show.legend = F
+  ) +
+  geom_point(
+    aes(colour = pop),
+    position = position_jitterdodge(jitter.width = 0.20),
+    show.legend = F,
+    size = 0.5,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = c("#88ccee", "sienna2")) +
+  scale_colour_manual(values = c("black", "black")) +
+  theme_classic()
+
+gx <- ggplot(stats_dist_day, aes(x = pop, y = vitesse_kmh, fill = stage)) +
+  geom_boxplot(
+    outlier.shape = NA
+  ) +
+  geom_point(
+    aes(colour = stage),
+    position = position_jitterdodge(jitter.width = 0.20),
+    show.legend = TRUE,
+    size = 0.6,
+    alpha = 0.7
+  ) +
+  scale_fill_manual(values = c("#88ccee", "sienna2")) +
+  scale_colour_manual(values = c("black", "black")) +
+  theme_classic()
+```
+
+
+
