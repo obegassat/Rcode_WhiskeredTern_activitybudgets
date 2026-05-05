@@ -8,3 +8,5 @@ The scripts focus on behavioural classification, movement metrics computation, a
 Behavioural Analysis
 
 WTBehav_classif_MomentuHMM.Rmd → Builds and evaluates behavioural classification models based on GPS locations using the MomentuHMM package.
+
+WTStats_tests_models.Rmd → Statistical analyses. Tests to know which factors (sex, stage, study area) influence the home-range area. Mixed models to test which factors influence the daily distances, movement intensity and time-activity budgets.
