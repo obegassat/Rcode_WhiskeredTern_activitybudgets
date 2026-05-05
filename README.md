@@ -4,5 +4,7 @@ This repository includes data processing, visualization, and statistical analysi
 The scripts focus on behavioural classification, movement metrics computation, and statistical analyses.
 
 📂 Repository Structure
+
 Behavioural Analysis
+
 WTBehav_classif_MomentuHMM.Rmd → Builds and evaluates behavioural classification models based on GPS locations using the MomentuHMM package.
