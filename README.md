@@ -5,8 +5,8 @@ The scripts focus on behavioural classification, movement metrics computation, a
 
 📂 Repository Structure
 
-Behavioural Analysis
+ **`WTBehav_classif_MomentuHMM.Rmd`** → Builds and evaluates behavioural classification models based on GPS locations using the MomentuHMM package.
+ 
+ **`WT_Movement_metrics.Rmd`** → Home-range area calculation (AKDEc) using the 'ctmm' package, calculation of daily distances and movement intensity.
 
-WTBehav_classif_MomentuHMM.Rmd → Builds and evaluates behavioural classification models based on GPS locations using the MomentuHMM package.
-
-WTStats_tests_models.Rmd → Statistical analyses. Tests to know which factors (sex, stage, study area) influence the home-range area. Mixed models to test which factors influence the daily distances, movement intensity and time-activity budgets.
+**`WTStats_tests_models.Rmd`** → Statistical analyses. Tests to know which factors (sex, stage, study area) influence the home-range area. Mixed models to test which factors influence the daily distances, movement intensity and time-activity budgets.
