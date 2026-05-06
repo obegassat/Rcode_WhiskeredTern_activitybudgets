@@ -1,0 +1,613 @@
+---
+title: "WT_movement_metrics"
+author: "Oceane BEGASSAT"
+date: "2026-05-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Packages
+
+
+```{r}
+#AKDE
+library(tidyverse)
+library(ctmm)
+library(dplyr)
+library(sf)
+
+#Distances
+library(tmap)
+```
+
+# 1) Home-range size : AKDEc
+
+According to 
+https://ecoisilva.github.io/AKDE_minireview/code/AKDE_R-tutorial.html
+
+Vocabulary http://vocab.nerc.ac.uk/collection/MVB/current/.
+
+
+*AKDE* Tracking data is autocorrelated	
+Estimates range distributions from autocorrelated data, by conditioning on an autocorrelation model.
+
+#### Model selection
+
+```{r}
+# =========================
+# 1. LOAD DATA
+# =========================
+
+data <- readRDS("rawdataGPSWT.rds.rds") 
+
+
+# =========================
+# 2. PREP FUNCTION
+# =========================
+
+
+prep_data <- function(df, pop_name, stage_name) {
+  df %>%
+    filter(pop == pop_name, stage == stage_name) %>%
+    dplyr::select(device_id, UTC_datetime, Longitude, Latitude) %>%
+    rename(
+      ID = device_id,
+      timestamp = UTC_datetime,
+      longitude = Longitude,
+      latitude = Latitude
+    )
+}
+
+da_incB  <- prep_data(data, "B",  "incub")
+da_reaB  <- prep_data(data, "B",  "rear")
+da_incGL <- prep_data(data, "GL", "incub")
+da_reaGL <- prep_data(data, "GL", "rear")
+
+
+# =========================
+# 3. TELEMETRY
+# =========================
+
+tele_incB  <- as.telemetry(da_incB)
+tele_reaB  <- as.telemetry(da_reaB)
+tele_incGL <- as.telemetry(da_incGL)
+tele_reaGL <- as.telemetry(da_reaGL)
+
+
+# =========================
+# 4. MODEL SELECTION FUNCTION
+# =========================
+
+# Movement models were selected individually using ctmm.select, starting from an initial guess and using AICc for model comparison.
+
+run_model_selection <- function(tele_list, prefix) {
+  
+  results <- list()
+  
+  for (i in seq_along(tele_list)) {
+    
+    id <- names(tele_list)[i]
+    cat("Running:", id, "\n")
+    
+    dat <- tele_list[[i]]
+    
+    # Initial guess
+    guess <- ctmm.guess(dat, interactive = FALSE)
+    
+    # Model selection
+    fit <- ctmm.select(dat, guess, method = "pHREML", verbose = FALSE)
+    
+    if (inherits(fit, "ctmm")) {
+      
+      # Save model
+      saveRDS(fit, paste0("NEWmodelwithlocnest_", prefix, "_", id, ".rds"))
+      
+      # Store results
+      results[[i]] <- data.frame(
+        ID         = id,
+        dataset    = prefix,
+        model      = summary(fit)$name,
+        dynamics   = fit$dynamics,
+        anisotropic = fit$isotropic["sigma"],
+        AICc       = fit$AICc,
+        logLik     = fit$loglike
+      )
+      
+    } else {
+      cat("No valid model for", id, "\n")
+    }
+  }
+  
+  # Bind results
+  results_df <- bind_rows(results)
+  
+  # Save table
+  write.csv(results_df,
+            paste0("model_selectionwithlocnest_", prefix, ".csv"),
+            row.names = FALSE)
+  
+  return(results_df)
+}
+
+
+# =========================
+# 5. RUN
+# =========================
+
+res_incB  <- run_model_selection(tele_incB,  "incB")
+res_reaB  <- run_model_selection(tele_reaB,  "reaB")
+res_incGL <- run_model_selection(tele_incGL, "incGL")
+res_reaGL <- run_model_selection(tele_reaGL, "reaGL")
+
+
+# =========================
+# 6. FINAL TABLE
+# =========================
+
+all_results <- bind_rows(res_incB, res_reaB, res_incGL, res_reaGL)
+
+write.csv(all_results,
+          "NEWmodel_selection_ALLwithlocnest.csv",
+          row.names = FALSE)
+```
+
+#### Apply model
+
+```{r}
+
+# ===========================
+#  Load Data
+# ===========================
+input_dir  <- "~/guif2024_akde/data2"    # where the selected models are stored
+output_dir <- "~/guif2024_akde/results2" # where to store the results
+data_file  <- "~/guif2024_akde/dataNEW/rawdataGPSWT.rds.rds" # dataset
+
+data1 <- readRDS(data_file)
+
+# =========================
+# 2. PREP FUNCTION
+# =========================
+prep_data <- function(df, pop_name, stage_name){
+  
+  df %>%
+    filter(pop == pop_name, stage == stage_name) %>%
+    dplyr::select(device_id, UTC_datetime, Longitude, Latitude) %>%
+    rename(
+      ID = device_id,
+      timestamp = UTC_datetime,
+      longitude = Longitude,
+      latitude = Latitude
+    )
+}
+
+# datasets
+da_incB  <- prep_data(data1, "B",  "incub")
+da_reaB  <- prep_data(data1, "B",  "rear")
+da_incGL <- prep_data(data1, "GL", "incub")
+da_reaGL <- prep_data(data1, "GL", "rear")
+
+# =========================
+# 3. TELEMETRY
+# =========================
+tele_incB  <- as.telemetry(da_incB)
+tele_reaB  <- as.telemetry(da_reaB)
+tele_incGL <- as.telemetry(da_incGL)
+tele_reaGL <- as.telemetry(da_reaGL)
+
+cat("✅ Data processing done : telemetry data are loaded\n")
+
+tele_list <- list(
+  incB  = tele_incB,
+  reaB  = tele_reaB,
+  incGL = tele_incGL,
+  reaGL = tele_reaGL
+)
+
+# =========================================
+#   Fonction de calcul AKDE pour un individu
+# =========================================
+
+#File structure NEWmodelwithlocnest_incB_243695.rds
+
+compute_akde <- function(fit_file, tele_list, weighted=FALSE) {
+  fname <- basename(fit_file)
+  prefix <- sub("^NEWmodelwithlocnest_", "", sub("\\.rds$", "", fname))   # ex: reaGL_243695
+  pop_stage <- sub("_.*$", "", prefix)                      # ex: reaGL
+  indiv_name <- sub("^[^_]*_", "", prefix)                  # ex: 243696
+
+  # Load selected model
+  fit <- readRDS(fit_file)
+
+  # Extract telemetry object
+  ind <- tele_list[[pop_stage]][[indiv_name]]
+
+  #  AKDE calculation
+  UD <- akde(ind, fit, weights=weighted)
+  ci <- summary(UD)$CI
+  N_eff <- summary(UD)$DOF["area"]
+  N_abs <- nrow(ind)
+
+  # save
+  saveRDS(UD, file.path(output_dir, paste0("NEWUDakdec_", prefix, ".rds")))
+  pdf(file.path(output_dir, paste0("NEWUDakdec_", prefix, ".pdf")))
+  plot(UD, main=paste("NEWUDakdec -", prefix))
+  dev.off()
+
+ #Export 
+ ud_sf <- ctmm::as.sf(UD, level.UD=0.95)
+ shp_file <- file.path(output_dir, paste0("NEWUDakdec_withlocnest_", prefix, ".shp"))
+ sf::st_write(ud_sf, shp_file, delete_layer = TRUE)
+
+  # Summary
+  return(data.frame(
+    Individual = prefix,
+    Areakm2       = ci[2],
+    CI_low     = ci[1],
+    CI_high    = ci[3],
+    N_eff = N_eff,
+    N_abs = N_abs,
+    stringsAsFactors = FALSE
+  ))
+}
+
+# ===========================
+#   Application à tous les modèles
+# ===========================
+
+model_files <- list.files(
+  input_dir,
+  pattern = "^NEWmodelwithlocnest_.*\\.rds$",
+  full.names = TRUE
+)
+
+cat("Models selected:\n")
+print(basename(model_files))
+
+results_allakdec <- do.call(
+  rbind,
+  lapply(model_files, compute_akde, tele_list=tele_list, weighted=FALSE)
+)
+
+# Save
+saveRDS(results_allakdec, file.path(output_dir, "NEWakdec_results_withlocnest.rds"))
+write.csv(results_allakdec, file.path(output_dir,"NEWakdec_results_withlocnest.csv"), row.names=FALSE)
+
+cat("✅ AKDE  for" ,nrow(results_allakdec), "individus\n")
+```
+
+# 2) Mean daily distance to the nest
+
+### Load data
+
+```{r}
+datal <- readRDS("rawdataGPSWT.rds" )#one row per location, n = 239 897
+
+#number of days in each breeding period per individual
+d_days <- datal %>%
+  mutate(
+    days_incub = as.numeric(days_incub),
+    days_rear  = as.numeric(days_rear),
+    tot_days   = as.numeric(tot_days)
+  ) %>%
+  group_by(device_id) %>%
+  summarise(
+    nb_locs      = n(),
+    nb_locs_inc  = sum(stage == "incub", na.rm = TRUE),
+    nb_locs_rea  = sum(stage == "rear",  na.rm = TRUE),
+    start_inc_date = min(date[stage == "incub"], na.rm = TRUE),
+    end_inc_date = max(date[stage == "incub"], na.rm = TRUE),
+    days_incub   = first(days_incub),
+    days_rear    = first(days_rear),
+    tot_days     = first(tot_days),
+    .groups = "drop"
+  )
+
+
+datal <- datal %>%
+  mutate(across(c(device_id, bague, pop, colonie, sex, name, stage), as.factor))
+datal <- datal %>% select(device_id, name, bague, pop, colonie, sex, stage, UTC_datetime, date, X, Y, Latitude, Longitude, LON_nid_R, LAT_nid_R, X_nid, Y_nid)
+summary(datal)
+
+```
+
+### Distance to the nest
+```{r}
+#Individual locations; split by study area
+dataB <- datal %>% 
+  filter(pop == "B") #X and Y ar UTM 30 and 31N coordinates
+datagl <- datal %>%  
+  filter(pop == "GL")
+
+#nests coordinates as UTM
+nestB <- datal %>% 
+  filter(pop == "B") %>% 
+  group_by(device_id) %>% 
+  summarize(X_nid = first(X_nid), Y_nid = first(Y_nid))
+
+nestGL <- datal %>% 
+  filter(pop == "GL") %>% 
+  group_by(device_id) %>% 
+  summarize(X_nid = first(X_nid), Y_nid = first(Y_nid))
+
+#convert as spatial: sf
+nestB <- nestB %>% 
+  st_as_sf(coords = c("X_nid", "Y_nid"), crs = 32631)  # Zone 31N pour B
+dataB <- dataB %>%  st_as_sf(coords = c("X", "Y"), crs = 32631)
+
+nestGL <- nestGL %>% 
+  st_as_sf(coords = c("X_nid", "Y_nid"), crs = 32630)
+datagl <- datagl %>%  st_as_sf(coords = c("X", "Y"), crs = 32630)
+
+#maps to check
+tmap_mode("view")  
+
+trajB <- dataB %>%
+  group_by(device_id) %>%
+  arrange(device_id, UTC_datetime) %>% 
+  summarize(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+trajGL <- datagl %>%
+  group_by(device_id) %>%
+  arrange(device_id, UTC_datetime) %>%
+  summarize(do_union = FALSE) %>%
+  st_cast("LINESTRING")
+
+tm_shape(trajB) +
+  tm_lines(col = "device_id", palette = "Set1", lwd = 0.5, group = "Trajectoires B") +
+tm_shape(nestB) +
+  tm_symbols(col = "device_id", shape = 21, size = 0.0001, alpha = 1, group = "Nids B") +
+
+tm_shape(trajGL) +
+  tm_lines(col = "device_id", palette = "Set2", lwd = 0.5, group = "Trajectoires GL") +
+tm_shape(nestGL) +
+  tm_symbols(col = "device_id", shape = 21, size = 0.0001, alpha = 1, group = "Nids GL") +
+
+tm_layout(legend.outside = TRUE)
+
+
+#--------------- Distances to the nest ----------------
+
+#Distance between each loc and the individual's nest
+
+dataB$DistNest <- NA  # to store distances
+for (i in unique(dataB$device_id)) {
+  # nest of the individual
+  nest <- nestB %>% filter(device_id == i)
+  # nest coords
+  nest_coords <- st_coordinates(nest)
+  # Locs for this individual
+  individual_locs <- dataB %>% filter(device_id == i)
+  # Distances calculation
+  individual_locs$DistNest <- as.numeric(st_distance(individual_locs, nest)) / 1000 # km
+
+  dataB$DistNest[dataB$device_id == i] <- individual_locs$DistNest
+}
+summary(dataB$DistNest) 
+ 
+
+datagl$DistNest <- NA  
+for (i in unique(datagl$device_id)) {
+  nest <- nestGL %>% filter(device_id == i)
+  
+  nest_coords <- st_coordinates(nest)
+  
+  individual_locs <- datagl %>% filter(device_id == i)
+  
+  individual_locs$DistNest <- as.numeric(st_distance(individual_locs, nest)) / 1000  
+  
+  datagl$DistNest[datagl$device_id == i] <- individual_locs$DistNest
+}
+summary(datagl$DistNest) 
+
+#store coordinates
+dataB <- dataB %>% 
+  mutate(X = st_coordinates(.)[,1],
+         Y = st_coordinates(.)[,2])
+
+datagl <- datagl %>% 
+  mutate(X = st_coordinates(.)[,1],
+         Y = st_coordinates(.)[,2])
+
+dataB <- dataB %>% st_drop_geometry()
+datagl <- datagl %>% st_drop_geometry()
+
+datall <- bind_rows(dataB, datagl)
+
+```
+
+### Remove locations on the nest and summarise
+
+```{r}
+# Add a column to indicate if the location is within 12m of the nest
+
+datall <- datall %>%
+  mutate(near_nest = ifelse(DistNest <= 0.012, 1, 0))  # 1 = near the nest, 0 = away
+
+
+datall1 <- datall %>% 
+  filter(DistNest>0.012) #114263 rows
+
+
+quantile(datall1$DistNest, 0.95)
+
+datall1B <- datall1 %>% filter(pop == "B")
+quantile(datall1B$DistNest, 0.95)
+
+datall1GL <- datall1 %>% filter(pop == "GL")
+quantile(datall1GL$DistNest, 0.95)
+
+#summary per day, distnest : min, med, max, mean, sd, 95IC per DAY and individual
+stats_dist_day <- datall1 %>%
+  group_by(device_id, date) %>%
+  summarise(
+    n = n(),
+    stage = first(stage), 
+    sex = first(sex), 
+    pop = first(pop), 
+    min_dist = min(DistNest, na.rm = TRUE),
+    median_dist = median(DistNest, na.rm = TRUE),
+    max_dist = max(DistNest, na.rm = TRUE),
+    p95_dist = quantile(DistNest, 0.95, na.rm = TRUE),
+    mean_dist = mean(DistNest, na.rm = TRUE),
+    sd_dist = sd(DistNest, na.rm = TRUE),
+    se = sd_dist / sqrt(n),
+    ic95_low = mean_dist - 1.96 * se,
+    ic95_up = mean_dist + 1.96 * se,
+    .groups = "drop"
+  )
+
+```
+
+# 3) Movement intensity
+
+### Cumulative distances per day
+```{r}
+
+# 1.Separate by pop
+dataB <- datall1B 
+datagl  <- datall1GL 
+
+# 2. Convert as sf
+dataB_sf <- st_as_sf(dataB, coords = c("X", "Y"), crs = 32631)  # UTM zone 31N
+datagl_sf  <- st_as_sf(datagl, coords = c("X", "Y"), crs = 32630)   # UTM zone 30N
+
+# 3. Function to calculate cumulative distances
+calcul_distance_par_jour <- function(df_sf) {
+  df_sorted <- df_sf %>%
+    group_by(device_id, date) %>% #per day
+    arrange(UTC_datetime) %>% 
+    mutate( 
+      prev_geom = lag(geometry),  # geometry of the previous location
+      dist_step = st_distance(prev_geom, geometry, by_element = TRUE),#distance (m)
+      dist_step = as.numeric(dist_step)
+    ) %>% #sum across the day
+    summarise(
+      dist_totale_jour = sum(dist_step, na.rm = TRUE),
+      pop = first(pop),
+      stage = first(stage), 
+      sex = first(sex), 
+      n = n(), #nb locs
+      .groups = "drop"
+    )
+  
+  return(df_sorted)
+}
+
+# 4. Appliquer la fonction aux deux jeux
+dist_brenne <- calcul_distance_par_jour(dataB_sf)
+summary(dist_brenne)
+ 
+dist_glieu  <- calcul_distance_par_jour(datagl_sf)
+summary(dist_glieu)
+
+# add to a pooled dataset
+dist_brenne <- st_drop_geometry(dist_brenne)
+dist_glieu <- st_drop_geometry(dist_glieu)
+dist_all <- bind_rows(dist_brenne, dist_glieu)
+
+
+#effects of pop and sex per stage
+ggplot(dist_all %>% filter(stage == "incub"), aes(x = pop, y = dist_totale_jour, fill = sex)) +
+  geom_boxplot(position = position_dodge(0.8)) +
+  labs(title = "Daily cumulative distances per sex and population (Incubation)",
+       x = "Population", y = " (m)") +
+  scale_fill_brewer(palette = "Set1") +
+  theme_classic()
+
+ggplot(dist_all %>% filter(stage == "rear"), aes(x = pop, y = dist_totale_jour, fill = sex)) +
+  geom_boxplot(position = position_dodge(0.8)) +
+  labs(title = "Daily cumulative distances per sex and population (Rearing)",
+       x = "Population", y = " (m)") +
+  scale_fill_brewer(palette = "Set1") +
+  theme_classic()
+
+
+```
+
+
+### Divide by the sum of delta t
+Average movement intensity
+
+```{r}
+
+# 3. Function to calculate delta t
+calcul_deltat <- function(df) {
+
+  df %>%
+    arrange(device_id, date, UTC_datetime) %>%
+    group_by(device_id, date) %>%# per day
+    mutate(
+      # time between locs (sec)
+      deltat = as.numeric(difftime(
+        UTC_datetime,
+        lag(UTC_datetime),
+        units = "secs"
+      )),
+
+      # distance entre points (en mètres)
+      dist_step = as.numeric(st_distance(
+        geometry,
+        lag(geometry),
+        by_element = TRUE
+      ))
+    ) %>%
+    summarise(
+      dist_totale_jour = sum(dist_step, na.rm = TRUE),   # m
+      temps_total_jour = sum(deltat, na.rm = TRUE),      # s
+      vitesse_moy_jour = dist_totale_jour / temps_total_jour, # m/s
+      vitesse_kmh = (dist_totale_jour / temps_total_jour) * 3.6,
+      pop = first(pop),
+      stage = first(stage),
+      sex = first(sex),
+      n=n(),#locs par jour
+      .groups = "drop"
+    )
+}
+
+# 4. Apply
+vitmoyB <- calcul_deltat(dataB_sf)
+vitmoygl <- calcul_deltat(datagl_sf)
+summary(vitmoyB$vitesse_kmh) #0.59-10.9km/h 
+summary(vitmoygl$vitesse_kmh) #1.7-8.34 km/h
+
+vitmoyB <- st_drop_geometry(vitmoyB)
+vitmoygl <- st_drop_geometry(vitmoygl)
+
+# Merge
+vitall <- bind_rows(vitmoyB, vitmoygl)
+hist(vitall$vitesse_kmh) #right squewed
+summary(vitall$vitesse_kmh)
+
+ggplot(vitall, aes(x = stage, y = vitesse_kmh, fill = sex)) +
+  geom_boxplot(position = position_dodge(0.8)) +
+  labs(title = "",
+       x = "stage", y = " (m)") +
+  scale_fill_brewer(palette = "Set1") +
+  theme_classic()
+
+ggplot(vitall %>% filter(pop == "GL"), aes(x = stage, y = vitesse_kmh, fill = sex)) +
+  geom_boxplot(position = position_dodge(0.8)) +
+  labs(title = "",
+       x = "stage", y = " (m)") +
+  scale_fill_brewer(palette = "Set1") +
+  theme_classic()
+
+ggplot(vitall %>% filter(pop == "B"), aes(x = stage, y = vitesse_kmh, fill = sex)) +
+  geom_boxplot(position = position_dodge(0.8)) +
+  labs(title = "",
+       x = "stage", y = " (m)") +
+  scale_fill_brewer(palette = "Set1") +
+  theme_classic()
+
+ggplot(vitall, aes(x = stage, y = vitesse_kmh, fill = pop)) +
+  geom_boxplot(position = position_dodge(0.8)) +
+  labs(title = "",
+       x = "stage", y = " (m)") +
+  scale_fill_brewer(palette = "Set1") +
+  theme_classic()
+
+```
+
