@@ -16,6 +16,7 @@ library(MuMIn) #pour AIcc
 library(lme4) #pour glmer
 library(emmeans)
 library(performance)#R²
+library(suncalc)  # getSunlightTimes()
 ```
 
 ## 1 ) Stats AKDEc
@@ -318,7 +319,7 @@ g1 <- ggplot(indiv_long, aes(x = stage, y = AKDE95log, fill = sex)) +
 
 ### Load
 ```{r}
-stats_dist_day <- readRDS("D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Thesis_guifette/GIT/PhD_whiskered_tern/Scripts_R/Reproduction/data_Mvmt_day.rds")
+stats_dist_day <- readRDS("data_Mvmt_day.rds")
 #daily basis, n = 281
 
 table(stats_dist_day$device_id, stats_dist_day$colonie)
@@ -764,7 +765,7 @@ Daily cumulatve distances / delta t (km/h)
 ### Load 
 
 ```{r}
-stats_dist_day <- readRDS ("D:/Home/ocbegassat/Documents/Oceane_BEGASSAT/Thesis_guifette/GIT/PhD_whiskered_tern/Scripts_R/Reproduction/data_Mvmt_day.rds")
+stats_dist_day <- readRDS ("data_Mvmt_day.rds")
 
 table(stats_dist_day$sex) 
 table(stats_dist_day$pop) 
@@ -1142,5 +1143,344 @@ gx <- ggplot(stats_dist_day, aes(x = pop, y = vitesse_kmh, fill = stage)) +
   theme_classic()
 ```
 
+##4 ) Daily time-activity budget
+% of location in each of the three main behaviours identified
+
+### Load data
+
+```{r}
+summary_states <-  readRDS("summary_statesdaily")
+#275 x 18, summarizes the daily proportion of each of the three identified states
 
 
+#In Incubation :
+summary_days <- summary_states %>%
+  filter(stage == "incub") %>%
+  group_by(device) %>%
+  summarise(
+    nb_locs = n(),
+    nb_days = n_distinct(time),
+    deb = min(time),
+    end = max(time),
+    .groups = "drop"
+  )
+
+#Chick rearing
+summary_days2 <- summary_states %>%
+  filter(stage == "rear") %>%
+  group_by(device) %>%
+  summarise(
+    nb_locs = n(),
+    nb_days = n_distinct(time),
+    deb = min(time),
+    end = max(time),
+    .groups = "drop"
+  )
+
+```
+
+### Day coverage
+To what extend do our locations cover the day?
+
+```{r}
+
+compute_day_length_summary <- function(df) {
+  
+  # 1️⃣Extract the dates
+  date_loc_df <- df %>%
+    mutate(date_only = as.Date(time)) %>%
+    distinct(date_only, LAT_nid_R, LON_nid_R)
+  
+  # 2️⃣Sunset and sunlight
+  sun_times_df <- date_loc_df %>%
+    rowwise() %>%
+    mutate(
+      sun_times = list(getSunlightTimes(
+        date = date_only,
+        lat = LAT_nid_R,
+        lon = LON_nid_R,
+        tz = "UTC",
+        keep = c("dawn", "dusk")
+      ))
+    ) %>%
+    unnest_wider(sun_times) %>%
+    mutate(
+      day_length_min = as.numeric(difftime(dusk, dawn, units = "mins")),
+      n_loc_per_min = round(day_length_min)  # 1 location / minute 
+    ) %>%
+    dplyr::select(date_only, LAT_nid_R, LON_nid_R, day_length_min, n_loc_per_min)
+  
+  # 3️⃣Merge
+  df_out <- df %>%
+    mutate(date_only = as.Date(time)) %>%
+    left_join(sun_times_df, by = c("date_only", "LAT_nid_R", "LON_nid_R")) %>%
+    dplyr::select(-date_only)
+  
+  return(df_out)
+}
+
+summary_states <- compute_day_length_summary(summary_states)
+summary_states$prop_locsday <- summary_states$N_global/summary_states$n_loc_per_min*100
+summary(summary_states$prop_locsday)
+
+#Not shown: save and test different thresold of day coverage
+#retained = 10%
+summary_states_keep <- summary_states
+summary_states <- summary_states %>% filter(prop_locsday>10)
+
+summary_days5 <- summary_states %>%
+  filter(stage == "incub") %>%
+  group_by(device) %>%
+  summarise(
+    nb_locs = n(),
+    .groups = "drop"
+  )
+
+summary_days6 <- summary_states %>%
+  filter(stage == "rear") %>%
+  group_by(device) %>%
+  summarise(
+    nb_locs = n(),
+    .groups = "drop"
+  )
+
+
+valid_days <- summary_states %>%
+  distinct(device_day)
+
+summary_states <- summary_states %>% select(-c(endrepro, day_length_min, n_loc_per_min, prop_locsday))
+
+
+table(summary_states$sex) 
+table(summary_states$pop.x) 
+table(summary_states$stage) 
+table(summary_states$device) 
+summary(summary_states$N_global) #103-968
+```
+
+ Not shown: remove the stationary locations <12m from the nest (= roosting)
+ 
+### Split by study area
+```{r}
+summary_states2 <-  readRDS("summary_statesdailyclean")
+summary_states2$device <- as.factor(summary_states2$device)
+summary_states2$stage <- as.factor(summary_states2$stage)
+summary_states2$nb_eggs <- as.factor(summary_states2$nb_eggs)
+
+
+summary_statesGL <- summary_states2 %>% 
+  filter(pop.x == "GL") %>% 
+  droplevels()
+
+summary_statesB <- summary_states2 %>% 
+  filter(pop.x == "B") %>% 
+  droplevels()
+
+```
+
+## Brenne
+
+### %Stationary
+
+```{r}
+#Y distribution
+#Y between 0 and 1 (%)
+ratio5 <- cbind(summary_statesB$n_nesting , summary_statesB$N_global-summary_statesB$n_nesting ) #for the glm building  
+
+par(mfrow=c(2,2))
+# Boxplot
+boxplot(summary_statesB$prop_nesting,col='blue',ylab='Daily %of resting at the nest')
+# Cleveland plot
+dotchart(summary_statesB$prop_nesting,pch=16,col='blue',xlab='Monthly mean \n of the daily %of resting at the nest')
+# Histogram
+hist(summary_statesB$prop_nesting,col='blue',xlab="Monthly mean\n of the daily %of resting at the nest",main="")
+# Quantile-Quantile plot
+qqnorm(summary_statesB$prop_nesting,pch=16,col='blue',xlab='')
+qqline(summary_statesB$prop_nesting,col='red')
+# Non normal
+shapiro.test(summary_statesB$prop_nesting) #W = 0.94015, p-value = 0.0001067
+#No outlier
+
+```
+### Xs
+```{r}
+par(mfrow=c(1,2))
+
+# Sex
+boxplot(prop_nesting ~ sex,
+        data = summary_statesB,
+        main = "Daily % of nesting bhv")
+
+#stage
+boxplot(
+  prop_nesting ~ stage,
+  data = summary_statesB,
+  col = c('blue3', 'red2'),
+  main = "Daily % of nesting bhv"
+)
+
+
+summary(summary_statesB$prop_nesting)
+
+```
+
+### Choice of the random factors
+
+```{r}
+#Interactions
+table(summary_statesB$sex,summary_statesB$stage )
+
+#GLM, constant model
+mod0glm <- glm(ratio5~1, family = binomial(link = "logit"), data = summary_statesB)
+#GLMM constant avec random = indiv
+mod0glmm <- glmer(ratio5~(1|device),family = binomial(link = "logit"), data = summary_statesB)
+#GLMM constant avec random = colony
+mod0glmm1 <- glmer(ratio5~(1|colony),family = binomial(link = "logit"), data = summary_statesB)
+#GLMM constant avec random = colony
+mod0glmm2 <- glmer(ratio5~(1|colony),family = binomial(link = "logit"), data = summary_statesB)
+
+#GLM complet
+modglm <- glm(ratio5~ sex*stage, family = binomial(link = "logit"), data = summary_statesB)
+
+#GLMM complet avec random = indiv
+modglmm <- glmer(ratio5~ sex*stage + (1|device),family = binomial(link = "logit"), data = summary_statesB)
+
+#GLMM complet avec random = colony
+modglmm1 <- glmer(ratio5~ sex*stage + (1|colony),family = binomial(link = "logit"), data = summary_statesB)
+
+#GLMM complet avec random = colony + device
+modglmm2 <- glmer(ratio5~ sex*stage + (1|colony) +(1|device),family = binomial(link = "logit"), data = summary_statesB) #singular
+
+#GLMM complet avec random = device nested in colony
+modglmm3 <- glmer(ratio5~ sex*stage + (1 | colony/device), family = binomial(link = "logit"), data = summary_statesB) #singular
+
+#Compare AICc
+model_list <- list(mod0glm,mod0glmm, mod0glmm1, mod0glmm2, modglm, modglmm, modglmm1, modglmm2, modglmm3)
+aiccs <- sapply(model_list, AICc)
+aiccs 
+
+model_list <- list(modglm, modglmm, modglmm1, modglmm2, modglmm3)
+aiccs <- sapply(model_list, AICc)
+aiccs
+best_model <- model_list[[ which.min(aiccs)]]
+best_model 
+
+```
+
+###  Model selection
+```{r}
+#Selection with Dredge
+fullmod <- glmer(
+  ratio5~ sex*stage + (1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+Dredge <- dredge(fullmod)
+
+mods <- get.models(Dredge, subset = 1:5)  
+r2_list <- lapply(mods, r.squaredGLMM)
+r2_df <- do.call(rbind, r2_list)
+r2_df <- cbind(Model = names(mods), r2_df)
+print(r2_df)
+
+mod1 <- glmer(
+  ratio5~ stage + (1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+r.squaredGLMM(mod1)
+mod1 <- glmer(
+  ratio5~ stage +sex+ (1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+r.squaredGLMM(mod1)
+mod1 <- glmer(
+  ratio5~ stage*sex + (1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+r.squaredGLMM(mod1)
+mod1 <- glmer(
+  ratio5~ (1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+r.squaredGLMM(mod1)
+mod1 <- glmer(
+  ratio5~ sex +(1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+r.squaredGLMM(mod1)
+
+mod1 <- glmer(
+  ratio5~  stage + (1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+
+mod2 <- glmer(
+  ratio5~sex + stage + (1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+
+confint(mod1, oldNames=FALSE) #acccurate
+confint(mod2, oldNames=FALSE) #sex not accurate
+
+
+mod <- glmer(
+  ratio5~  stage + (1|device),family = binomial(link = "logit"), data = summary_statesB , na.action = na.fail)
+summary(mod)
+AICc(mod) 
+confint(mod, oldNames=FALSE) 
+r.squaredGLMM(mod)
+
+emm <- emmeans(mod, ~ stage, type = "response")
+emm
+
+contrast(emm, method = "pairwise", type = "response")
+contrast(emm, method = "revpairwise")
+
+emm.2 <- lsmeans(mod, ~ stage, type = "response") 
+
+summary(emm.2)
+
+ggplot(summary_statesB, aes(x = stage, y = prop_nesting, color = sex)) +
+  geom_boxplot()+
+  geom_jitter(data = summary_statesB, 
+              aes(x = stage, y = prop_nesting, color = sex),
+              width = 0.1, alpha = 0.5, size = 0.2) +
+  theme_classic()
+
+ggplot(summary_statesB, aes(x = stage, y = prop_nesting)) +
+  geom_boxplot()+
+  geom_jitter(data = summary_statesB, 
+              aes(x = stage, y = prop_nesting),
+              width = 0.1, alpha = 0.5, size = 0.2) +
+  theme_classic()
+```
+### Assumption checking
+
+```{r}
+mod1 <- mod
+resid<-residuals(mod1, type="pearson")
+
+par(mfrow=c(3,2))
+# Histogram
+hist(resid,col='blue',xlab="residuals",main="")
+# Quantile-Quantile plot
+qqnorm(resid,pch=16,col='blue',xlab='')
+qqline(resid,col='red')
+
+# residuals vs fitted
+plot(resid~fitted(mod1)
+      , col='blue'
+      , pch=16)
+abline(h = 0)
+
+
+boxplot(resid~ summary_statesB$stage, 
+         varwidth = TRUE,
+         ylab = "Residuals",
+         xlab = "Stage",
+         main = "")
+abline(h = 0)
+```
+
+### Plots
+```{r}
+
+gaa <- ggplot(summary_statesB, aes(x = stage, y = prop_nesting, fill = stage)) +
+  geom_boxplot(
+    outlier.shape = NA, show.legend = FALSE
+  ) +
+  geom_point(
+    position = position_jitter(width = 0.20),
+    size = 0.5,
+    alpha = 0.7,
+    colour = "black", show.legend = FALSE
+  ) +
+  scale_fill_manual(values = c("white", "grey60")) +
+  scale_y_continuous(limits = c(0,1)) +
+  theme_classic()
+```
+
+The same process was followed for the other states and for Grand-Lieu
